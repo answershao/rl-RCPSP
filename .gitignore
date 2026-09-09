@@ -29,7 +29,9 @@ __MACOSX/
 .workbuddy/
 
 # ---------- Datasets (4430 corpus + BKS xlsx; regenerate/provide externally) ----------
-data/
+# Root-anchored: a bare "data/" would also match the SOURCE package src/data/
+# (parsers.py / adapter.py / instances.py) and silently exclude it from VCS.
+/data/
 
 # ---------- Generated experiment outputs (all re-runnable via scripts + README) ----------
 outputs/
@@ -38,7 +40,7 @@ outputs/
 #   scripts/*.csv outputs are only produced under outputs/ and stay ignored.
 
 # ---------- Background training / run logs ----------
-logs/
+/logs/
 *.log
 
 # ---------- Test and tooling caches ----------
