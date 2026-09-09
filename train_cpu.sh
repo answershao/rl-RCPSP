@@ -85,7 +85,7 @@ nohup python -m scripts.train_ppo \
     --validation-min-delta "${VALIDATION_MIN_DELTA}" \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --seed "${SEED}" \
-    "${EVAL_ARGS[@]}" \
+    ${EVAL_ARGS[@]+"${EVAL_ARGS[@]}"} \
     --output-dir "${RUN_DIR}" \
     "$@" >"${TRAIN_LOG_FILE}" 2>&1 &
 

@@ -51,6 +51,7 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
 | 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
 | 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv`（gap vs BKS、below-BKS 告警） |
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
+| **一键步骤 2+4** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→GPHH→aggregate 合并出表；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
 
 `--suites` 合法 id：`psplib_j30/j60/j90/j120`、`rg30`、`rg300`、`patterson`（`scripts/common.py::SUITE_SPECS`）。
 
@@ -72,7 +73,7 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
 ## 关键口径（与 docs/EXECUTION_FLOW.md §1 同源）
 
 - `splits.json` 是**唯一切分清单**：训练=rg30_train(1620)、训练期验证=rg30_validation(180)、
-  评估=evaluation 各组；PSPLIB 全体训练期不可见。
+  test=PSPLIB（主测试集，训练期不可见）；rg300/patterson 为可选泛化/补充参考，不进主对比表。
 - 解析唯一入口 `src.data.adapter.load_core_instance`；实例唯一标识 = 数据根相对路径去扩展名。
 - 模型全局 cap：302 活动 / 4 资源 / MAX_SUCCESSORS=96（j30→RG300 零样本单模型）。
 - BKS：`data/bks/bks_psplib.json`（由 RCPLIB xlsx 合成，勿单独引用平凡兜底 UB 列）。

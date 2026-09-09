@@ -64,7 +64,7 @@ nohup python -m scripts.train_ppo \
     --validation-interval "${VALIDATION_INTERVAL}" \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --seed 17 \
-    "${EVAL_ARGS[@]}" \
+    ${EVAL_ARGS[@]+"${EVAL_ARGS[@]}"} \
     --output-dir "${RUN_DIR}" \
     "$@" >"${TRAIN_LOG_FILE}" 2>&1 &
 

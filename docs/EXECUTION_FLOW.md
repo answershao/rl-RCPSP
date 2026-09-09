@@ -11,10 +11,10 @@
 
 | 套件 | 数量 | 格式 | 位置 | 角色 |
 |---|---|---|---|---|
-| PSPLIB j30–j120 | 2040 | `.sm` | `data/psplib/` | **最终评估（主基准）**，BKS 已知 → 精确 gap；训练全程不可见 |
+| PSPLIB j30–j120 | 2040 | `.sm` | `data/psplib/` | **test（主测试集）**，BKS 已知 → 精确 gap；训练全程不可见 |
 | RG30（Set 1–5） | 1800 | `.rcp` | `data/oras/RCPSP/RG30/` | **唯一训练池**（分层留 10% 作训练期验证） |
-| RG300 | 480 | `.rcp` | `data/oras/RCPSP/RG300/` | 最终评估（跨规模泛化，302 活动） |
-| Patterson | 110 | `.rcp` | `data/oras/RCPSP/Patterson/` | 最终评估（补充） |
+| RG300 | 480 | `.rcp` | `data/oras/RCPSP/RG300/` | 可选泛化参考（跨规模 302 活动；非主 test） |
+| Patterson | 110 | `.rcp` | `data/oras/RCPSP/Patterson/` | 可选补充参考（非主 test） |
 | BKS | — | xlsx | `data/bks/RCPLIB (Parameters and BKS).xlsx` | 最优值来源（合成 → json） |
 
 固定约定：
@@ -38,7 +38,9 @@
       ├─ scripts/run_ga.py ──────────────────▶ ga CSV（ga_makespan，默认 50×200）
       ├─ scripts/run_gphh.py ────────────────▶ best_rule.txt + eval_summary.csv（训练只读 rg30_train）
       ├─ scripts/train_ppo.py ───────────────▶ outputs/experiments/ppo/<run>/ppo_eval_summary.csv
-      │     （训练=rg30_train；验证=rg30_validation 按 serial_LST gap 择优；评估=evaluation 各组）
+      │     （训练=rg30_train；验证=rg30_validation 按 serial_LST gap 择优 checkpoint；
+      │       final_model.zip = 训练结束恢复 best 验证权重后的落盘，即 best model）
+      │        评估对象：主 test=PSPLIB 各规模；rg300/patterson 为可选泛化/补充参考
       │        shell：train_a800.sh / train_cpu.sh（训练+评估）、eval_cpu.sh（仅评估已有模型）
       │        search_ppo.py（跨 seed：outputs/experiments/ppo/seedN/final_model.zip）→ shell：search_cpu.sh
       │
