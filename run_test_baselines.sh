@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Step 2 (+ step 4 merge) of the agreed pipeline, WITHOUT PPO training:
-#   solve the test suites (PSPLIB j30-j120) with priority rules / GA / GPHH,
+#   solve the test suites (PSPLIB j30-j120) with priority rules / GA
+#   (GPHH optional, off by default -- enable with RUN_GPHH=1),
 #   then merge everything into one comparison CSV (gap vs BKS).
 #
 # Step 3 (PPO) runs separately via train_a800.sh / train_cpu.sh.  After a
@@ -34,7 +35,9 @@ SUITES="${SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
 RUN_RULES="${RUN_RULES:-1}"
 RUN_GA="${RUN_GA:-1}"
-RUN_GPHH="${RUN_GPHH:-1}"
+# GPHH disabled by default: GP evolution is slow (train 40 trees x N generations
+# before any evaluation).  Enable explicitly with RUN_GPHH=1.
+RUN_GPHH="${RUN_GPHH:-0}"
 RUN_AGGREGATE="${RUN_AGGREGATE:-1}"
 ALLOW_OVERWRITE="${ALLOW_OVERWRITE:-0}"
 WITH_PPO="${WITH_PPO:-0}"
@@ -125,6 +128,13 @@ fi
 
 # ---------------- step 4: merge everything into one comparison table ----------
 if [[ "${RUN_AGGREGATE}" == "1" ]]; then
+    AGG_GPHH_ARGS=()
+    if [[ -f "${OUT_GPHH_DIR}/eval_summary.csv" ]]; then
+        AGG_GPHH_ARGS=(--gphh "${OUT_GPHH_DIR}/eval_summary.csv")
+    else
+        echo "[warn] gphh eval_summary not found -> merged table will have no gphh column"
+        echo "       (run with RUN_GPHH=1 first to produce it)"
+    fi
     AGG_PPO_ARGS=()
     if [[ "${WITH_PPO}" == "1" ]]; then
         if [[ ! -f "${PPO_SUMMARY}" ]]; then
@@ -140,9 +150,9 @@ if [[ "${RUN_AGGREGATE}" == "1" ]]; then
     "${PYTHON}" -m scripts.aggregate_results \
         --rules "${OUT_RULES}" \
         --ga "${OUT_GA}" \
-        --gphh "${OUT_GPHH_DIR}/eval_summary.csv" \
         --bks "${BKS_JSON}" \
         --out-dir "${OUT_AGG}" \
+        ${AGG_GPHH_ARGS[@]+"${AGG_GPHH_ARGS[@]}"} \
         ${AGG_PPO_ARGS[@]+"${AGG_PPO_ARGS[@]}"} 2>&1 | tee "${LOG_DIR}/aggregate_${RUN_STAMP}.log"
 
     echo "== done =="
