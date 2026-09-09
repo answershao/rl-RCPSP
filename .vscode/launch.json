@@ -2,55 +2,39 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "MPLIB2: Summarize dataset",
+            "name": "RCPSP: Generate splits.json protocol",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/scripts/summarize_mplib2.py",
+            "module": "scripts.make_splits",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
-                "data/MPLIB2"
+                "--data-root",
+                "data",
+                "--seed",
+                "20260909",
+                "--output",
+                "splits.json"
             ]
         },
         {
-            "name": "MPLIB2: Filter 10 projects x 50 activities x 5 resources",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/scripts/filter_mplib2.py",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "data/MPLIB2",
-                "--projects",
-                "10",
-                "--activities-per-project",
-                "50",
-                "--resources",
-                "5",
-                "--output-dir",
-                "data/MPLIB2_train_10_50_5",
-                "--link"
-            ]
-        },
-        {
-            "name": "RCMPSP: Visualize one instance",
+            "name": "RCPSP: Visualize one instance (j30)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/visualize_instance.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
-                "data/MPLIB2_train_10_50_5/MPLIB2_Set1_224.rcmp"
+                "data/psplib/j30/j3010_1.sm"
             ]
         },
         {
-            "name": "RCMPSP: Solve all MPLIB2 10 projects x 50 activities x 5 resources",
+            "name": "RCPSP: Baselines priority rules (rg30 full)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.baselines",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "subProcess": false,
             "env": {
                 "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
@@ -59,22 +43,119 @@
                 "PYTHONUNBUFFERED": "1"
             },
             "args": [
-                "--instances-root",
-                "data/MPLIB2_train_10_50_5",
+                "--data-root",
+                "data",
+                "--suites",
+                "rg30",
                 "--seed",
                 "17",
-                "--exact-time-limit",
-                "120",
-                "--exact-workers",
-                "1",
                 "--instance-workers",
-                "48",
+                "8",
                 "--output-csv",
-                "outputs/baselines/runs/mplib2_10_50_5/makespan_summary.csv"
+                "outputs/rules_rg30/makespan_summary.csv"
             ]
         },
         {
-            "name": "RCMPSP: Debug PPO-GIN environment step (CPU)",
+            "name": "RCPSP: Baselines priority rules (j30 5-instance smoke)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.baselines",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "args": [
+                "--data-root",
+                "data",
+                "--suites",
+                "psplib_j30",
+                "--max-instances",
+                "5",
+                "--instance-workers",
+                "4",
+                "--seed",
+                "17",
+                "--output-csv",
+                "outputs/rules_j30_smoke/makespan_summary.csv"
+            ]
+        },
+        {
+            "name": "RCPSP: GA smoke (psplib_j30, 5 instances)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.run_ga",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "args": [
+                "--data-root",
+                "data",
+                "--suites",
+                "psplib_j30",
+                "--max-instances",
+                "5",
+                "--instance-workers",
+                "4",
+                "--seed",
+                "17",
+                "--population",
+                "24",
+                "--generations",
+                "40",
+                "--output-csv",
+                "outputs/ga_smoke/ga.csv"
+            ]
+        },
+        {
+            "name": "RCPSP: GPHH smoke (RG30 8 + eval j30 2)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.run_gphh",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "args": [
+                "--data-root",
+                "data",
+                "--splits",
+                "splits.json",
+                "--train-instances",
+                "8",
+                "--seed",
+                "17",
+                "--population",
+                "30",
+                "--generations",
+                "15",
+                "--eval-suites",
+                "psplib_j30",
+                "--max-instances",
+                "2",
+                "--eval-workers",
+                "4",
+                "--output-dir",
+                "outputs/gphh_smoke/vscode"
+            ]
+        },
+        {
+            "name": "RCPSP: Debug PPO-GIN environment step (CPU)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",
@@ -92,22 +173,26 @@
                 "PYTHONUNBUFFERED": "1"
             },
             "args": [
-                "--instances-root",
-                "data/MPLIB2_train_10_50_5",
+                "--data-root",
+                "data",
+                "--splits",
+                "splits.json",
+                "--ref-rules",
+                "outputs/rules_rg30/makespan_summary.csv",
                 "--n-envs",
                 "1",
                 "--total-timesteps",
                 "512",
                 "--n-steps",
-                "512",
+                "256",
                 "--batch-size",
                 "64",
                 "--n-epochs",
                 "1",
-                "--overfit-instances",
-                "1",
                 "--validation-interval",
                 "1",
+                "--eval-suites",
+                "psplib_j30",
                 "--eval-max-instances",
                 "1",
                 "--eval-batch-size",
@@ -118,24 +203,18 @@
                 "cpu",
                 "--mixed-precision",
                 "none",
-                "--vec-env",
-                "subproc",
                 "--torch-threads",
                 "1",
                 "--torch-interop-threads",
                 "1",
                 "--seed",
                 "17",
-                "--splits",
-                "outputs/manifests/ppo_step_debug/splits.json",
-                "--baseline-results",
-                "outputs/baselines_mplib2_10_50_5/makespan_summary.csv",
                 "--output-dir",
                 "outputs/experiments/ppo/step_debug"
             ]
         },
         {
-            "name": "RCMPSP: Train PPO-GIN on MPLIB2 10 projects x 50 activities x 5 resources (A800)",
+            "name": "RCPSP: Train PPO-GIN on RG30 protocol (A800)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",
@@ -150,8 +229,16 @@
                 "PYTHONUNBUFFERED": "1"
             },
             "args": [
-                "--instances-root",
-                "data/MPLIB2_train_10_50_5",
+                "--data-root",
+                "data",
+                "--splits",
+                "splits.json",
+                "--ref-rules",
+                "outputs/rules_rg30/makespan_summary.csv",
+                "--max-activities",
+                "302",
+                "--max-resources",
+                "4",
                 "--n-envs",
                 "96",
                 "--total-timesteps",
@@ -183,16 +270,13 @@
                 "1",
                 "--seed",
                 "17",
-                "--splits",
-                "outputs/manifests/ppo_a800_vscode/splits.json",
-                "--baseline-results",
-                "outputs/baselines_mplib2_10_50_5/makespan_summary.csv",
+                "--eval-all",
                 "--output-dir",
-                "outputs/experiments/ppo/a800_runs/vscode_a800"
+                "outputs/experiments/ppo/ppo_rcpsp"
             ]
         },
         {
-            "name": "RCMPSP: Evaluate PPO-GIN on all MPLIB2 10 projects x 50 activities x 5 resources (CPU)",
+            "name": "RCPSP: Evaluate PPO-GIN on psplib_j30 (CPU)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",
@@ -208,8 +292,10 @@
                 "PYTHONUNBUFFERED": "1"
             },
             "args": [
-                "--instances-root",
-                "data/MPLIB2_train_10_50_5",
+                "--data-root",
+                "data",
+                "--splits",
+                "splits.json",
                 "--evaluate-only",
                 "--device",
                 "cpu",
@@ -219,15 +305,13 @@
                 "1",
                 "--eval-batch-size",
                 "32",
+                "--eval-suites",
+                "psplib_j30",
                 "--seed",
                 "17",
-                "--baseline-results",
-                "outputs/baselines_mplib2_10_50_5/makespan_summary.csv",
-                "--splits",
-                "outputs/manifests/cpu_baseline/splits.json",
                 "--output-dir",
-                "outputs/experiments/ppo/cpu_baseline"
+                "outputs/experiments/ppo/ppo_rcpsp"
             ]
-        },
+        }
     ]
 }

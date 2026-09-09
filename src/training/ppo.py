@@ -1,4 +1,4 @@
-"""PPO configuration and evaluation helpers for RCMPSP experiments."""
+"""PPO configuration and evaluation helpers for RCPSP experiments."""
 
 from __future__ import annotations
 
@@ -12,11 +12,9 @@ from torch import nn
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3 import PPO
 
-from src.core.rcmpsp import (
-    Instance,
-    parse_rcmp,
-)
-from src.environments.observation import (
+from src.core.rcpsp import Instance
+from src.data.adapter import load_core_instance
+from src.envs.observation import (
     MAX_SUCCESSORS,
     ObservationLayout,
     StaticGraphCache,
@@ -149,7 +147,7 @@ def create_ppo(
     resource_payload = observation_dim - one_resource_size
     if resource_payload <= 0 or resource_payload % per_resource_size:
         raise ValueError(
-            "environment observation has incompatible RCMPSP layout: "
+            "environment observation has incompatible RCPSP layout: "
             f"got {observation_dim} for {max_activities} activities"
         )
     max_resources = resource_payload // per_resource_size + 1
@@ -228,41 +226,69 @@ def evaluate_paths(
     batch_size: int = 32,
     evaluation_cache: StaticGraphCache | None = None,
     restore_cache: StaticGraphCache | None = None,
+    loader=None,
+    name_fn=None,
 ) -> list[tuple[str, float]]:
-    """Evaluate paths in inference batches while keeping environments independent."""
-    from src.environments.multi_instance import MultiInstanceRCMPSPEnv
+    """Evaluate paths in inference batches while keeping environments independent.
 
+    The static graph cache is keyed by *instance name* (see
+    :func:`src.envs.observation.build_static_graph_cache`).  ``name_fn`` maps an
+    evaluation path to the cache key that was used when the cache was built, so
+    the two must agree exactly:
+
+    * single-process / unique-stem usage may keep the default ``Path.stem``;
+    * protocol callers (``splits.json`` paths, where RG30 file stems collide
+      across the ``Set`` directories) must pass ``name_fn=instance_id`` and the
+      matching protocol loader, or this check fails loudly instead of silently
+      reusing a cache that maps paths to the wrong activities.
+
+    ``evaluation_cache``/``restore_cache`` switch the extractor's static cache
+    for the duration of the evaluation and restore the previous one afterwards.
+    """
+    from src.envs.multi_instance import MultiInstanceRCPSPEnv
+
+    loader = loader or load_core_instance
+    name_fn = name_fn or (lambda path: path.stem)
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     if not paths:
         return []
     extractor = model.policy.features_extractor
     if not isinstance(extractor, SharedDirectedGINExtractor):
-        raise TypeError("model does not use the RCMPSP static graph cache")
+        raise TypeError("model does not use the RCPSP static graph cache")
     original_cache = _cache_from_extractor(extractor)
     if evaluation_cache is None:
-        evaluation_instances = [parse_rcmp(path) for path in paths]
+        evaluation_instances = [loader(Path(path)) for path in paths]
         evaluation_cache = build_static_graph_cache(
             evaluation_instances,
             max_activities=reference_env.max_activities,
             max_resources=reference_env.max_resources,
             max_successors=extractor.max_successors,
         )
-    expected_names = tuple(Path(path).stem for path in paths)
+    # name_fn must reproduce the cache keys exactly; a mismatch means the cache
+    # was built from different paths or a different name convention (stem vs
+    # protocol instance_id), so fail before any observation is generated.
+    expected_names = tuple(name_fn(Path(path)) for path in paths)
     if evaluation_cache.instance_names != expected_names:
-        raise ValueError("evaluation cache does not match evaluation paths")
+        raise ValueError(
+            "evaluation cache instance names "
+            f"{evaluation_cache.instance_names!r} do not match evaluation paths "
+            f"under name_fn {expected_names!r}; pass loader/name_fn consistent "
+            "with the cache (protocol callers: instances.instance_id / loader_for)"
+        )
     extractor.set_static_cache(evaluation_cache)
     try:
         makespans = np.zeros(len(paths), dtype=np.float64)
         for batch_start in range(0, len(paths), batch_size):
             batch_paths = paths[batch_start : batch_start + batch_size]
             envs = [
-                MultiInstanceRCMPSPEnv(
+                MultiInstanceRCPSPEnv(
                     [path],
                     max_activities=reference_env.max_activities,
                     max_resources=reference_env.max_resources,
                     instance_indices=[batch_start + local_index],
                     catalog_size=extractor.instance_count,
+                    loader=loader,
                 )
                 for local_index, path in enumerate(batch_paths)
             ]
@@ -291,7 +317,7 @@ def evaluate_paths(
             print(f"evaluation progress: {completed}/{len(paths)}")
     finally:
         extractor.set_static_cache(restore_cache or original_cache)
-    return [(Path(path).name, makespans[index]) for index, path in enumerate(paths)]
+    return [(name_fn(Path(path)), makespans[index]) for index, path in enumerate(paths)]
 
 
 def evaluate_paths_sampled(
@@ -305,6 +331,8 @@ def evaluate_paths_sampled(
     evaluation_cache: StaticGraphCache | None = None,
     restore_cache: StaticGraphCache | None = None,
     path_offset: int = 0,
+    loader=None,
+    name_fn=None,
 ) -> dict[int, list[tuple[str, float]]]:
     """Evaluate stochastic policy trajectories and keep the best makespan.
 
@@ -312,8 +340,10 @@ def evaluate_paths_sampled(
     Results for smaller budgets are therefore prefixes of the 32-trajectory
     run, rather than independent random experiments.
     """
-    from src.environments.multi_instance import MultiInstanceRCMPSPEnv
+    from src.envs.multi_instance import MultiInstanceRCPSPEnv
 
+    loader = loader or load_core_instance
+    name_fn = name_fn or (lambda path: path.stem)
     budgets = _validate_sample_budgets(sample_budgets)
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -324,18 +354,18 @@ def evaluate_paths_sampled(
 
     extractor = model.policy.features_extractor
     if not isinstance(extractor, SharedDirectedGINExtractor):
-        raise TypeError("model does not use the RCMPSP static graph cache")
+        raise TypeError("model does not use the RCPSP static graph cache")
     original_cache = _cache_from_extractor(extractor)
     max_samples = max(budgets)
     if evaluation_cache is None:
-        evaluation_instances = [parse_rcmp(path) for path in paths]
+        evaluation_instances = [loader(Path(path)) for path in paths]
         evaluation_cache = build_static_graph_cache(
             evaluation_instances,
             max_activities=reference_env.max_activities,
             max_resources=reference_env.max_resources,
             max_successors=extractor.max_successors,
         )
-    expected_names = tuple(Path(path).stem for path in paths)
+    expected_names = tuple(name_fn(Path(path)) for path in paths)
     if evaluation_cache.instance_names != expected_names:
         raise ValueError("evaluation cache does not match evaluation paths")
 
@@ -362,12 +392,13 @@ def evaluate_paths_sampled(
             for local_index, path in enumerate(batch_paths):
                 for trajectory_number in range(max_samples):
                     envs.append(
-                        MultiInstanceRCMPSPEnv(
+                        MultiInstanceRCPSPEnv(
                             [path],
                             max_activities=reference_env.max_activities,
                             max_resources=reference_env.max_resources,
                             instance_indices=[batch_start + local_index],
                             catalog_size=extractor.instance_count,
+                            loader=loader,
                         )
                     )
                     trajectory_paths.append(local_index)
@@ -418,7 +449,7 @@ def evaluate_paths_sampled(
         for budget in budgets:
             best = np.min(makespans[:, :budget], axis=1)
             result[budget] = [
-                (Path(path).name, float(best[index]))
+                (name_fn(Path(path)), float(best[index]))
                 for index, path in enumerate(paths)
             ]
         return result

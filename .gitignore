@@ -1,40 +1,50 @@
-# Python caches and build artifacts
+# ---------- Python caches and build artifacts ----------
 __pycache__/
 *.py[cod]
 *$py.class
 build/
 dist/
 *.egg-info/
+*.so
 
-# Virtual environments and local configuration
+# ---------- Virtual environments and local configuration ----------
 .venv/
 venv/
 env/
 .env
 .env.*
+.pyenv/
 
-# macOS metadata
+# ---------- macOS / editor metadata ----------
 .DS_Store
 __MACOSX/
-# .vscode/*
+.idea/
+*.swp
+*~
+# .vscode/ is intentionally tracked (launch.json defines the 9 RCPSP tasks);
+# keep only personal bits out:
+.vscode/*.code-workspace
 
-# Generated experiment outputs
-outputs/**/*.png
-outputs/**/*.zip
-outputs/**/*.npz
-outputs/**/events.out.tfevents.*
-outputs/**/*.csv
-outputs/**/*.json
+# ---------- WorkBuddy workspace data (local memory / logs, not VCS material) ----------
+.workbuddy/
 
-# Test and tooling caches
+# ---------- Datasets (4430 corpus + BKS xlsx; regenerate/provide externally) ----------
+data/
+
+# ---------- Generated experiment outputs (all re-runnable via scripts + README) ----------
+outputs/
+# Note: root-level protocol artifacts below ARE committed on purpose:
+#   splits.json   -- the single split manifest (seed 20260909, regen via scripts/make_splits.py)
+#   scripts/*.csv outputs are only produced under outputs/ and stay ignored.
+
+# ---------- Background training / run logs ----------
+logs/
+*.log
+
+# ---------- Test and tooling caches ----------
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-
-# Background training logs
-logs/
-
-# Large instance datasets
-data/
+.coverage.*

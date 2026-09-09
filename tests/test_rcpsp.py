@@ -1,11 +1,13 @@
-from pathlib import Path
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from src.core.rcmpsp import (
+from src.core.rcpsp import (
     generate_schedule,
-    parse_rcmp,
     preview_serial_sgs_insert,
     priority_fifo,
     priority_shortest_duration,
@@ -13,25 +15,33 @@ from src.core.rcmpsp import (
     serial_sgs_insert,
     validate_schedule,
 )
+from src.data.adapter import load_core_instance
 from src.visualization.aon import plot_aon
 from src.visualization.gantt import plot_gantt
-from test import TEST_INSTANCE
+from tests import TEST_INSTANCE
 
 
-class RcmpspTest(unittest.TestCase):
+class RcpspTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.instance = parse_rcmp(TEST_INSTANCE)
+        cls.instance = load_core_instance(TEST_INSTANCE)
 
-    def test_parser_reads_expected_structure(self) -> None:
-        self.assertEqual(len(self.instance.activities), 520)
-        self.assertEqual(self.instance.resource_count, 5)
-        self.assertEqual(self.instance.capacities, (48, 48, 46, 50, 48))
-        self.assertEqual(self.instance.activities[(1, 1)].duration, 0)
-        self.assertEqual(self.instance.activities[(10, 52)].duration, 0)
-        for activity in self.instance.activities.values():
+    def test_adapter_reads_expected_structure(self) -> None:
+        instance = self.instance
+        # j3010_1 is a 32-activity / 4-resource PSPLIB j30 instance (two of the
+        # 32 rows are the zero-duration dummy source and sink).
+        self.assertEqual(len(instance.activities), 32)
+        self.assertEqual(instance.resource_count, 4)
+        self.assertEqual(len(instance.capacities), 4)
+        zero_duration = [
+            activity.id
+            for activity in instance.activities.values()
+            if activity.duration == 0
+        ]
+        self.assertEqual(len(zero_duration), 2)
+        for activity in instance.activities.values():
             for successor in activity.successors:
-                self.assertIn(activity.id, self.instance.predecessors[successor])
+                self.assertIn(activity.id, instance.predecessors[successor])
 
     def test_baselines_generate_valid_schedules(self) -> None:
         priorities = [
@@ -42,7 +52,7 @@ class RcmpspTest(unittest.TestCase):
         for priority in priorities:
             schedule = generate_schedule(self.instance, priority)
             validate_schedule(self.instance, schedule)
-            self.assertEqual(len(schedule.starts), 520)
+            self.assertEqual(len(schedule.starts), 32)
             self.assertGreater(schedule.makespan, 0)
 
     def test_random_priority_is_reproducible(self) -> None:
@@ -51,9 +61,16 @@ class RcmpspTest(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_serial_sgs_preview_is_non_mutating_and_matches_insert(self) -> None:
-        activity_id = (1, 1)
+        # The dummy source has no predecessors, so it is eligible on an empty
+        # partial schedule (duration 0 -> placement at time 0).
+        activity_id = next(
+            activity.id
+            for activity in self.instance.activities.values()
+            if not self.instance.predecessors[activity.id]
+        )
+        duration = self.instance.activities[activity_id].duration
         finishes = {}
-        usage = np.zeros((self.instance.activities[activity_id].duration + 1, 5), dtype=np.int32)
+        usage = np.zeros((duration + 1, self.instance.resource_count), dtype=np.int32)
         usage_before = usage.copy()
 
         preview = preview_serial_sgs_insert(
@@ -67,6 +84,7 @@ class RcmpspTest(unittest.TestCase):
             self.instance, activity_id, starts, finishes, usage
         )
         self.assertEqual(inserted, preview)
+        self.assertEqual(inserted, (0, duration))
 
     def test_gantt_chart_is_written(self) -> None:
         output = Path("test-output-gantt.png")

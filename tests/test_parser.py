@@ -1,27 +1,44 @@
-import sys
+"""Parser structure tests for .sm / .rcp.
 
-sys.path.insert(0, "src")
-from rcpsp_data import load_instance, sgs_schedule
+Exercises ``src.data.parsers`` (the shared parse backend for the whole stack:
+baselines, GA/GPHH and the RL data adapter).  Scheduling is *not* implemented
+at the parser level — the third test verifies parsed instances are directly
+schedulable by the canonical core kernel (``src.core.rcpsp.generate_schedule``)
+through the ``src.data.adapter`` bridge.
+"""
 
-# 1. .sm 解析
-inst = load_instance("data/psplib/j30/j301_1.sm")
-assert inst.n_activities == 32 and inst.n_renewable == 4
-assert inst.successors[0] == [1, 2, 3]  # j30_1 的虚源后继
-assert len(inst.topological_order()) == 32
+import pytest
 
-# 2. .rcp 解析
-inst2 = load_instance("data/oras/RCPSP/RG300/RG300_1.rcp")
-assert inst2.n_activities == 302 and inst2.n_renewable == 4
-assert (inst2.capacities == 10).all()  # 与 head 输出一致
-assert len(inst2.successors[0]) == 72  # 虚源 72 个后继
+from src.core.rcpsp import generate_schedule
+from src.data.adapter import load_core_instance
+from src.data.parsers import load_instance
 
-# 3. SGS 跑通且满足约束
-for inst_x in (inst, inst2):
-    order = inst_x.topological_order()
-    start = sgs_schedule(inst_x, order)
-    mk = (start + inst_x.durations).max()
-    print(
-        f"{inst_x.name}: activities={inst_x.n_activities}, "
-        f"ES-schedule makespan={mk}, horizon={inst_x.horizon}"
-    )
-print("ALL TESTS PASSED")
+J30_SM = "data/psplib/j30/j301_1.sm"
+RG300_RCP = "data/oras/RCPSP/RG300/RG300_1.rcp"
+
+
+def test_sm_parse_j30(repo_root):
+    inst = load_instance(repo_root / J30_SM)
+    assert inst.n_activities == 32 and inst.n_renewable == 4
+    # j301_1: dummy source fans out to the first three real jobs.
+    assert inst.successors[0] == [1, 2, 3]
+    assert len(inst.topological_order()) == 32
+
+
+def test_rcp_parse_rg300(repo_root):
+    inst = load_instance(repo_root / RG300_RCP)
+    assert inst.n_activities == 302 and inst.n_renewable == 4
+    assert (inst.capacities == 10).all()
+    assert len(inst.successors[0]) == 72  # dummy source successor count
+
+
+def test_parsed_instances_are_schedulable_by_core(repo_root):
+    """Parse → adapt → core serial SGS end-to-end on both file formats.
+
+    Guarantees parser output is consumable by the canonical kernel without any
+    parser-local scheduling shim (R2: single serial SGS lives in core only).
+    """
+    for rel in (J30_SM, RG300_RCP):
+        instance = load_core_instance(repo_root / rel)
+        schedule = generate_schedule(instance)  # FIFO default priority
+        assert schedule.makespan > 0, f"core SGS produced empty result for {rel}"

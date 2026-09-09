@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Render the Gantt chart and AON network for one RCMP instance."""
+"""Render the Gantt chart and AON network for one single-project RCPSP instance.
+
+Accepts any ``.sm`` (PSPLIB) / ``.rcp`` (ProGen / Patterson) instance parsed by
+``src.data.parsers`` and adapted through ``src.data.adapter``.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +14,15 @@ import sys
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.core.rcmpsp import generate_schedule, parse_rcmp, priority_fifo
+from src.core.rcpsp import generate_schedule, priority_fifo
+from src.data.adapter import load_core_instance
 from src.visualization.aon import plot_aon
 from src.visualization.gantt import plot_gantt
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("instance", type=Path, help="path to one .rcmp instance")
+    parser.add_argument("instance", type=Path, help="path to one .sm/.rcp instance")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -33,7 +38,7 @@ def render_instance(instance_path: Path, output_dir: Path | None = None) -> tupl
     if not instance_path.is_file():
         raise FileNotFoundError(f"instance file does not exist: {instance_path}")
 
-    instance = parse_rcmp(instance_path)
+    instance = load_core_instance(instance_path)
     schedule = generate_schedule(instance, priority_fifo)
     output_dir = output_dir or Path("outputs") / "visualizations" / instance_path.stem
 

@@ -17,7 +17,9 @@ export PYTHONUNBUFFERED=1
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-outputs/experiments/ppo/cpu_runs/cpu_${RUN_STAMP}}"
-SPLITS_PATH="${SPLITS_PATH:-${RUN_DIR}/splits.json}"
+DATA_ROOT="${DATA_ROOT:-data}"
+SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
+REF_RULES="${REF_RULES:-outputs/rules_rg30/makespan_summary.csv}"
 LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo}"
 mkdir -p "${LOG_DIR}"
 TRAIN_LOG_FILE="${LOG_DIR}/cpu_${RUN_STAMP}.log"
@@ -28,11 +30,10 @@ if [[ -f "${RUN_DIR}/final_model.zip" && "${ALLOW_OVERWRITE_BASELINE:-0}" != "1"
     exit 2
 fi
 
-# Keep the total CPU footprint close to the 52 physical cores on this host.
-# These can be overridden for benchmarking, for example N_ENVS=40.
+# Total CPU footprint should stay close to the physical cores (52 on the CPU
+# host).  These can be overridden for benchmarking, for example N_ENVS=40.
 N_ENVS="${N_ENVS:-32}"
 N_STEPS="${N_STEPS:-384}"
-# The retained baseline uses a larger minibatch and three PPO epochs.
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 N_EPOCHS="${N_EPOCHS:-3}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
@@ -44,15 +45,23 @@ TARGET_KL="${TARGET_KL:-0.01}"
 GAMMA="${GAMMA:-0.999}"
 GAE_LAMBDA="${GAE_LAMBDA:-0.98}"
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-5}"
-# Validation runs 225 complete schedules and is intentionally less frequent
-# than the training rollouts; override this for tighter early-stop monitoring.
 VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-25}"
 VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SEED="${SEED:-17}"
+EVAL_ALL="${EVAL_ALL:-0}"
+
+EVAL_ARGS=()
+if [[ "${EVAL_ALL}" == "1" ]]; then
+    EVAL_ARGS=(--eval-all)
+fi
 
 nohup python -m scripts.train_ppo \
-    --instances-root data/MPLIB2_train_10_50_5 \
+    --data-root "${DATA_ROOT}" \
+    --splits "${SPLITS_PATH}" \
+    --ref-rules "${REF_RULES}" \
+    --max-activities 302 \
+    --max-resources 4 \
     --n-envs "${N_ENVS}" \
     --total-timesteps "${TOTAL_TIMESTEPS}" \
     --n-steps "${N_STEPS}" \
@@ -76,14 +85,14 @@ nohup python -m scripts.train_ppo \
     --validation-min-delta "${VALIDATION_MIN_DELTA}" \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --seed "${SEED}" \
-    --splits "${SPLITS_PATH}" \
-    --baseline-results outputs/baselines_mplib2_10_50_5/makespan_summary.csv \
+    "${EVAL_ARGS[@]}" \
     --output-dir "${RUN_DIR}" \
     "$@" >"${TRAIN_LOG_FILE}" 2>&1 &
 
 TRAIN_PID=$!
 echo "training started in background: PID=${TRAIN_PID}"
 echo "log: ${TRAIN_LOG_FILE}"
+echo "run dir: ${RUN_DIR}"
 
 if [[ "${WAIT_FOR_TRAINING:-0}" == "1" ]]; then
     wait "${TRAIN_PID}"

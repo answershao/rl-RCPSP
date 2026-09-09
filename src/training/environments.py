@@ -1,4 +1,4 @@
-"""Factories for RCMPSP environments used by SB3 training and evaluation."""
+"""Factories for RCPSP environments used by SB3 training and evaluation."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from pathlib import Path
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
-from src.environments.multi_instance import MultiInstanceRCMPSPEnv
-from src.environments.sb3_env import make_sb3_env
+from src.envs.multi_instance import MultiInstanceRCPSPEnv
+from src.envs.sb3_env import make_sb3_env
 from src.training.callbacks import TERMINAL_METRICS
 
 
 def monitored_env(env) -> Monitor:
-    """Expose episode returns and RCMPSP terminal metrics to SB3 logging."""
+    """Expose episode returns and RCPSP terminal metrics to SB3 logging."""
     return Monitor(env, info_keywords=TERMINAL_METRICS)
 
 
@@ -30,17 +30,19 @@ def make_multi_env(
     max_resources: int | None = None,
     instance_indices: list[int] | None = None,
     catalog_size: int | None = None,
+    loader: Callable | None = None,
 ) -> Monitor:
     """Create a monitored multi-instance environment with optional padding."""
-    return monitored_env(
-        MultiInstanceRCMPSPEnv(
-            instance_paths,
-            max_activities=max_activities,
-            max_resources=max_resources,
-            instance_indices=instance_indices,
-            catalog_size=catalog_size,
-        )
+    kwargs = dict(
+        instances=instance_paths,
+        max_activities=max_activities,
+        max_resources=max_resources,
+        instance_indices=instance_indices,
+        catalog_size=catalog_size,
     )
+    if loader is not None:
+        kwargs["loader"] = loader
+    return monitored_env(MultiInstanceRCPSPEnv(**kwargs))
 
 
 def make_vector_env(

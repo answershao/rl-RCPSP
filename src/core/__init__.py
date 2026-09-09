@@ -1,1 +1,1 @@
-"""RCMPSP instance parsing and scheduling algorithms."""
+"""RCPSP instance parsing and scheduling algorithms."""

@@ -1,9 +1,12 @@
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.visualize_instance import render_instance
-from test import TEST_INSTANCE
+from tests import TEST_INSTANCE
 
 
 class VisualizeInstanceTest(unittest.TestCase):

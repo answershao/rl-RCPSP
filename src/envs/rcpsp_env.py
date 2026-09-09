@@ -1,4 +1,4 @@
-"""Gymnasium environment for activity-selection RCMPSP scheduling."""
+"""Gymnasium environment for activity-selection RCPSP scheduling."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from src.core.rcmpsp import (
+from src.core.rcpsp import (
     ActivityId,
     Instance,
     Schedule,
-    parse_rcmp,
     preview_serial_sgs_insert,
     serial_sgs_insert,
     validate_schedule,
 )
-from src.environments.observation import (
+from src.data.adapter import load_core_instance
+from src.envs.observation import (
     DYNAMIC_ACTIVITY_FEATURE_COUNT,
     RESOURCE_PROFILE_BIN_COUNT,
     RESOURCE_PROFILE_CHANNEL_COUNT,
@@ -66,7 +66,7 @@ class _ScheduleState:
         self.terminated = False
 
 
-class RCMPSPEnv(gym.Env[dict[str, np.ndarray], int]):
+class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
     """Construct a serial SSGS schedule by selecting eligible activities.
 
     One step selects one precedence-eligible activity and inserts it at its
@@ -78,7 +78,9 @@ class RCMPSPEnv(gym.Env[dict[str, np.ndarray], int]):
 
     def __init__(self, instance: Instance | str | Path):
         super().__init__()
-        self.instance = parse_rcmp(instance) if isinstance(instance, (str, Path)) else instance
+        self.instance = (
+            load_core_instance(instance) if isinstance(instance, (str, Path)) else instance
+        )
         self.activity_ids = tuple(sorted(self.instance.activities))
         self.activity_index = {activity_id: i for i, activity_id in enumerate(self.activity_ids)}
         self.activity_count = len(self.activity_ids)

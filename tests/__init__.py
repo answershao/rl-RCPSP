@@ -1,8 +1,9 @@
-"""Tests for the RCMPSP package."""
+"""Tests for the RCPSP package."""
 
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
-TEST_INSTANCE = Path(
-    "data/MPLIB2_train_10_50_5/MPLIB2_Set1_0.rcmp"
-)
+# Real single-project RCPSP instances shared by the environment / RL tests.
+TEST_INSTANCE = REPO_ROOT / "data/psplib/j30/j3010_1.sm"
+TEST_INSTANCE_2 = REPO_ROOT / "data/psplib/j30/j3010_2.sm"

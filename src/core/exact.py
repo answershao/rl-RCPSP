@@ -1,10 +1,10 @@
-"""CP-SAT exact and bounded-time solution support for RCMPSP instances."""
+"""CP-SAT exact and bounded-time solution support for RCPSP instances."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.core.rcmpsp import Instance, Schedule, validate_schedule
+from src.core.rcpsp import Instance, Schedule, validate_schedule
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ def solve_exact(instance: Instance, *, time_limit: float = 60.0, workers: int = 
         from ortools.sat.python import cp_model
     except ImportError as exc:
         raise ImportError(
-            "exact RCMPSP solving requires OR-Tools; install it with "
+            "exact RCPSP solving requires OR-Tools; install it with "
             "`python -m pip install 'ortools>=9.10,<10'`"
         ) from exc
 
@@ -41,12 +41,12 @@ def solve_exact(instance: Instance, *, time_limit: float = 60.0, workers: int = 
     ends = {}
     intervals = {}
     for activity_id, activity in instance.activities.items():
-        start = model.NewIntVar(0, horizon, f"start_{activity_id[0]}_{activity_id[1]}")
-        end = model.NewIntVar(0, horizon, f"end_{activity_id[0]}_{activity_id[1]}")
+        start = model.NewIntVar(0, horizon, f"start_{activity_id}")
+        end = model.NewIntVar(0, horizon, f"end_{activity_id}")
         starts[activity_id] = start
         ends[activity_id] = end
         intervals[activity_id] = model.NewIntervalVar(
-            start, activity.duration, end, f"activity_{activity_id[0]}_{activity_id[1]}"
+            start, activity.duration, end, f"activity_{activity_id}"
         )
 
     for activity_id, predecessors in instance.predecessors.items():

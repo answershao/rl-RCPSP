@@ -1,33 +1,37 @@
+import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock
+import warnings
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
 
-from src.core.rcmpsp import parse_rcmp
-from scripts.train_ppo import load_baseline_results
-from src.environments.observation import (
+from scripts.train_ppo import load_reference_rules
+from src.data.adapter import load_core_instance
+from src.envs.observation import (
     ObservationLayout,
     build_static_graph_cache,
 )
-from src.environments.multi_instance import make_splits
-from src.environments.rcmpsp_env import RCMPSPEnv
-from src.environments.sb3_env import make_sb3_env
+from src.envs.rcpsp_env import RCPSPEnv
+from src.envs.sb3_env import make_sb3_env
 from src.training.environments import make_multi_env, make_single_env, make_vector_env
-from src.training.callbacks import TERMINAL_METRICS, RCMPSPMetricsCallback
+from src.training.callbacks import TERMINAL_METRICS, RCPSPMetricsCallback
 from src.training.features import _aggregate_edge_messages
+from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import (
     create_ppo,
     evaluate_paths,
     evaluate_paths_sampled,
 )
-from test import TEST_INSTANCE
+from tests import TEST_INSTANCE, TEST_INSTANCE_2
 
 
 class Sb3Test(unittest.TestCase):
@@ -39,7 +43,7 @@ class Sb3Test(unittest.TestCase):
 
     def test_validation_callback_uses_evaluation_patience_and_saves_best(self):
         gaps = iter((0.10, 0.095))
-        callback = RCMPSPMetricsCallback(
+        callback = RCPSPMetricsCallback(
             checkpoint_dir="checkpoints",
             early_stop_patience=1,
             validation_interval=2,
@@ -98,30 +102,28 @@ class Sb3Test(unittest.TestCase):
         torch.testing.assert_close(compact_predecessors, predecessor_sum)
         torch.testing.assert_close(compact_successors, successor_sum)
 
-    def test_shared_baseline_results_are_validated(self):
+    def test_reference_rules_are_loaded_by_unique_instance_id(self):
         with TemporaryDirectory() as directory:
             result_path = Path(directory) / "baselines.csv"
             result_path.write_text(
-                "instance,FIFO,Shortest,Random,CP-SAT\n"
-                "sample.rcmp,10,11,12,9\n",
-                encoding="ascii",
+                "file,serial_LST,serial_FIFO\n"
+                "psplib/j30/j3010_1.sm,42,59\n"
+                "psplib/j30/j3010_2.sm,43,58\n",
+                encoding="utf-8",
             )
+            loaded = load_reference_rules(result_path, "serial_LST")
             self.assertEqual(
-                load_baseline_results(result_path, ["sample.rcmp"]),
+                loaded,
                 {
-                    "sample.rcmp": {
-                        "FIFO": 10,
-                        "Shortest": 11,
-                        "Random": 12,
-                        "CP-SAT": 9,
-                    }
+                    "psplib/j30/j3010_1": 42,
+                    "psplib/j30/j3010_2": 43,
                 },
             )
-            with self.assertRaisesRegex(ValueError, "does not cover"):
-                load_baseline_results(result_path, ["missing.rcmp"])
+            with self.assertRaisesRegex(ValueError, "missing reference column"):
+                load_reference_rules(result_path, "does_not_exist")
 
     def test_ppo_rejects_misaligned_static_cache(self):
-        base = RCMPSPEnv(TEST_INSTANCE)
+        base = RCPSPEnv(TEST_INSTANCE)
         env = make_sb3_env(TEST_INSTANCE)
         cache = build_static_graph_cache(
             [base.instance],
@@ -158,77 +160,79 @@ class Sb3Test(unittest.TestCase):
             vector_env.close()
 
     def test_sampled_evaluation_uses_prefix_minima_and_restores_cache(self):
-        instance_text = "\n".join(
-            (
-                "1",
-                "2",
-                "1 1",
-                "3",
-                "1 1",
-                "2 1 1 1 1:3",
-                "2 1 1 1 1:3",
-                "1 0 0 0",
-            )
-        ) + "\n"
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            training_path = root / "training.rcmp"
-            evaluation_path = root / "evaluation.rcmp"
-            training_path.write_text(instance_text, encoding="ascii")
-            evaluation_path.write_text(instance_text, encoding="ascii")
-            instance = parse_rcmp(training_path)
-            env = make_sb3_env(training_path)
-            model = create_ppo(
-                env,
-                instances=[instance],
-                n_steps=3,
-                batch_size=3,
-                n_epochs=1,
-                gin_layers=1,
-                seed=1,
-                device="cpu",
-            )
-            try:
-                extractor = model.policy.features_extractor
-                reference_env = SimpleNamespace(
-                    max_activities=len(instance.activities),
-                    max_resources=instance.resource_count,
-                )
-                training_cache = build_static_graph_cache(
-                    [instance],
-                    max_activities=reference_env.max_activities,
-                    max_resources=reference_env.max_resources,
-                    max_successors=extractor.max_successors,
-                )
-                sampled = evaluate_paths_sampled(
-                    model,
-                    [str(evaluation_path)],
-                    seed=11,
-                    reference_env=reference_env,
-                    sample_budgets=(1, 2),
-                    batch_size=1,
-                    restore_cache=training_cache,
-                )
-                self.assertEqual(set(sampled), {1, 2})
-                self.assertLessEqual(sampled[2][0][1], sampled[1][0][1])
-                self.assertEqual(extractor.instance_names, ("training",))
-                with self.assertRaisesRegex(ValueError, "between 1 and 32"):
-                    evaluate_paths_sampled(
-                        model,
-                        [],
-                        seed=11,
-                        reference_env=reference_env,
-                        sample_budgets=(33,),
-                    )
-            finally:
-                env.close()
-
-    def test_adapter_and_short_learning_run(self):
-        base = RCMPSPEnv(TEST_INSTANCE)
-        check_env(base, warn=True, skip_render_check=True)
+        training_instance = load_core_instance(TEST_INSTANCE)
         env = make_sb3_env(TEST_INSTANCE)
         model = create_ppo(
-            env, instances=[base.instance], n_steps=8, batch_size=8,
+            env,
+            instances=[training_instance],
+            n_steps=3,
+            batch_size=3,
+            n_epochs=1,
+            gin_layers=1,
+            seed=1,
+            device="cpu",
+        )
+        try:
+            extractor = model.policy.features_extractor
+            reference_env = SimpleNamespace(
+                max_activities=len(training_instance.activities),
+                max_resources=training_instance.resource_count,
+            )
+            training_cache = build_static_graph_cache(
+                [training_instance],
+                max_activities=reference_env.max_activities,
+                max_resources=reference_env.max_resources,
+                max_successors=extractor.max_successors,
+            )
+            # Evaluation on a *different* instance exercises the temporary
+            # static-cache switch and its restoration afterwards.
+            sampled = evaluate_paths_sampled(
+                model,
+                [str(TEST_INSTANCE_2)],
+                seed=11,
+                reference_env=reference_env,
+                sample_budgets=(1, 2),
+                batch_size=1,
+                restore_cache=training_cache,
+            )
+            self.assertEqual(set(sampled), {1, 2})
+            self.assertLessEqual(sampled[2][0][1], sampled[1][0][1])
+            self.assertEqual(extractor.instance_names, ("j3010_1",))
+            with self.assertRaisesRegex(ValueError, "between 1 and 32"):
+                evaluate_paths_sampled(
+                    model,
+                    [],
+                    seed=11,
+                    reference_env=reference_env,
+                    sample_budgets=(33,),
+                )
+        finally:
+            env.close()
+
+    def test_adapter_and_short_learning_run(self):
+        base = RCPSPEnv(TEST_INSTANCE)
+        # SB3's env_checker warns that the per-activity observation matrices
+        # (dynamic_activity_features / resource_demands / resource_profile) are
+        # neither images nor flat 1D vectors.  That 2D activity x feature layout
+        # is intentional: the custom GIN policy consumes it directly.  We silence
+        # only this specific structural hint so the remaining env_checker
+        # contract (spaces, step semantics, determinism) still runs as errors.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Your observation .* has an unconventional shape .*",
+                category=UserWarning,
+            )
+            check_env(base, warn=True, skip_render_check=True)
+        # The static graph catalog holds two instances so that the later
+        # evaluate_paths call (two paths, catalog_size=2) stays in range.
+        training_instances = [
+            load_core_instance(TEST_INSTANCE),
+            load_core_instance(TEST_INSTANCE_2),
+        ]
+        env = make_sb3_env(TEST_INSTANCE)
+        model = create_ppo(
+            env, instances=training_instances, n_steps=8, batch_size=8,
             n_epochs=1, gin_layers=1,
             seed=1, device="cpu",
         )
@@ -264,13 +268,17 @@ class Sb3Test(unittest.TestCase):
             expected_action, _ = model.predict(observation, deterministic=True)
             np.testing.assert_array_equal(restored_action, expected_action)
 
-        paths = make_splits()["train"][:2]
+        # Evaluate on two RG30 training instances through the protocol loader.
+        protocol = read_protocol(Path("splits.json"))
+        paths = protocol["train"][:2]
+        loader = loader_for(Path("data"))
+        name_fn = instance_id
         reference_env = SimpleNamespace(
             max_activities=base.activity_count,
             max_resources=base.resource_count,
         )
         training_cache = build_static_graph_cache(
-            [base.instance],
+            training_instances,
             max_activities=base.activity_count,
             max_resources=base.resource_count,
         )
@@ -281,6 +289,8 @@ class Sb3Test(unittest.TestCase):
             reference_env=reference_env,
             batch_size=1,
             restore_cache=training_cache,
+            loader=loader,
+            name_fn=name_fn,
         )
         self.assertEqual(
             model.policy.features_extractor.instance_names,
@@ -293,6 +303,8 @@ class Sb3Test(unittest.TestCase):
             reference_env=reference_env,
             batch_size=2,
             restore_cache=training_cache,
+            loader=loader,
+            name_fn=name_fn,
         )
         self.assertEqual(batched, sequential)
         with self.assertRaisesRegex(ValueError, "batch_size must be positive"):

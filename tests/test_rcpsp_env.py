@@ -1,21 +1,26 @@
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from gymnasium.utils.env_checker import check_env
 
-from src.core.rcmpsp import Activity, Instance, generate_schedule, parse_rcmp, validate_schedule
-from src.environments.rcmpsp_env import (
+from src.core.rcpsp import Activity, Instance, generate_schedule, validate_schedule
+from src.data.adapter import load_core_instance
+from src.envs.rcpsp_env import (
     INVALID_ACTION_PENALTY,
-    RCMPSPEnv,
+    RCPSPEnv,
 )
-from test import TEST_INSTANCE
+from tests import TEST_INSTANCE
 
 
-class RcmpspEnvTest(unittest.TestCase):
+class RcpspEnvTest(unittest.TestCase):
     def test_dynamic_features_preview_eligible_activity_placement(self) -> None:
-        first = (1, 1)
-        second = (1, 2)
-        sink = (1, 3)
+        first = 1
+        second = 2
+        sink = 3
         instance = Instance(
             name="dynamic-features",
             capacities=(1,),
@@ -26,7 +31,7 @@ class RcmpspEnvTest(unittest.TestCase):
             },
             predecessors={first: (), second: (), sink: (first, second)},
         )
-        env = RCMPSPEnv(instance)
+        env = RCPSPEnv(instance)
         observation, _ = env.reset()
         dynamic = observation["dynamic_activity_features"]
         np.testing.assert_array_equal(observation["resource_profile"], 0.0)
@@ -61,10 +66,10 @@ class RcmpspEnvTest(unittest.TestCase):
         )
 
     def test_gymnasium_interface(self) -> None:
-        check_env(RCMPSPEnv(TEST_INSTANCE), skip_render_check=True)
+        check_env(RCPSPEnv(TEST_INSTANCE), skip_render_check=True)
 
     def test_random_episode_has_legal_schedule_and_makespan_reward(self) -> None:
-        env = RCMPSPEnv(TEST_INSTANCE)
+        env = RCPSPEnv(TEST_INSTANCE)
         observation, info = env.reset(seed=11)
         self.assertTrue(env.observation_space.contains(observation))
         self.assertIn("eligible_mask", info)
@@ -97,8 +102,8 @@ class RcmpspEnvTest(unittest.TestCase):
         self.assertAlmostEqual(terminal_info["episode_reward"], total_reward)
 
     def test_incremental_decoder_matches_batch_ssgs(self) -> None:
-        instance = parse_rcmp(TEST_INSTANCE)
-        env = RCMPSPEnv(instance)
+        instance = load_core_instance(TEST_INSTANCE)
+        env = RCPSPEnv(instance)
         env.reset(seed=23)
         priorities = np.random.default_rng(23).uniform(-1.0, 1.0, env.activity_count)
 

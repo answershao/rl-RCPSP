@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Evaluate the selected PPO policy with 32 sampled trajectories."""
+"""Evaluate selected PPO checkpoints with 32 sampled trajectories per seed.
+
+This is the post-training inference search over the fixed RCPSP protocol:
+
+* checkpoint layout: ``<models-root>/seed<N>/<model-file>`` (one directory per
+  training seed, e.g. produced by running ``scripts/train_ppo.py`` with a
+  different ``--output-dir`` per seed);
+* evaluated instance groups come from ``splits.json`` (``rg30_validation`` plus
+  any ``evaluation`` group such as ``psplib_j30``), shared by every seed;
+* instances load through ``src.data.adapter`` and names are the unique
+  data-root-relative ids, so results join cleanly with the baseline CSVs.
+
+Metrics are reported per group and aggregated across seeds; when ``--ref-rules``
+(a ``scripts/baselines.py`` CSV) is given, each run is also expressed as a
+rule-relative gap (default reference column ``serial_LST``).
+"""
 
 from __future__ import annotations
 
@@ -19,94 +34,91 @@ from stable_baselines3 import PPO
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.train_ppo import load_baseline_results, resolve_device
-from src.core.rcmpsp import parse_rcmp
-from src.environments.observation import build_static_graph_cache
+from scripts.train_ppo import resolve_device
+from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import MAX_SAMPLE_TRAJECTORIES, evaluate_paths_sampled
-
 
 SAMPLE_BUDGET = MAX_SAMPLE_TRAJECTORIES
 METHOD_NAME = f"PPO-sampled-{SAMPLE_BUDGET}"
-SPLITS = ("validation", "test")
 MethodResults = list[tuple[str, float]]
 SeedResults = dict[int, dict[str, MethodResults]]
 
 
+def _reference_env_for(model: PPO) -> SimpleNamespace:
+    extractor = model.policy.features_extractor
+    return SimpleNamespace(
+        max_activities=extractor.max_activities,
+        max_resources=extractor.max_resources,
+    )
+
+
 def _evaluate_worker(
     model_path: str,
-    paths: list[str],
-    path_offset: int,
+    rels: list[str],
     seed: int,
     batch_size: int,
-    max_activities: int,
-    max_resources: int,
     device: str,
+    loader,
+    name_fn,
+    path_offset: int,
 ) -> MethodResults:
     """Load one model per process for sampled evaluation."""
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     model = PPO.load(model_path, device=device)
     try:
-        instances = [parse_rcmp(path) for path in paths]
-        evaluation_cache = build_static_graph_cache(
-            instances,
-            max_activities=max_activities,
-            max_resources=max_resources,
-            max_successors=model.policy.features_extractor.max_successors,
-        )
         sampled = evaluate_paths_sampled(
             model,
-            paths,
+            rels,
             seed,
-            SimpleNamespace(
-                max_activities=max_activities,
-                max_resources=max_resources,
-            ),
+            _reference_env_for(model),
             sample_budgets=(SAMPLE_BUDGET,),
             batch_size=batch_size,
-            evaluation_cache=evaluation_cache,
             path_offset=path_offset,
+            loader=loader,
+            name_fn=name_fn,
         )
         return sampled[SAMPLE_BUDGET]
     finally:
         model.policy.set_training_mode(False)
 
 
-def evaluate_seed_split(
+def evaluate_group(
     model_path: Path,
-    paths: list[str],
+    rels: list[str],
     seed: int,
-    evaluation_seed: int,
-    reference_env,
-    evaluation_cache,
     batch_size: int,
     device: str,
+    loader,
+    name_fn,
     workers: int,
+    evaluation_seed: int,
 ) -> MethodResults:
-    """Evaluate one split with the selected sampled policy."""
-    if not paths:
+    """Evaluate one group with the selected sampled policy."""
+    if not rels:
         return []
     if workers == 1:
         model = PPO.load(str(model_path), device=device)
         try:
             sampled = evaluate_paths_sampled(
                 model,
-                paths,
+                rels,
                 evaluation_seed + seed,
-                reference_env,
+                _reference_env_for(model),
                 sample_budgets=(SAMPLE_BUDGET,),
                 batch_size=batch_size,
-                evaluation_cache=evaluation_cache,
+                loader=loader,
+                name_fn=name_fn,
             )
             return sampled[SAMPLE_BUDGET]
         finally:
             model.policy.set_training_mode(False)
             del model
 
-    chunk_size = (len(paths) + workers - 1) // workers
+    chunk_size = (len(rels) + workers - 1) // workers
     chunks = [
-        (start, paths[start : start + chunk_size])
-        for start in range(0, len(paths), chunk_size)
+        (start, rels[start : start + chunk_size])
+        for start in range(0, len(rels), chunk_size)
     ]
     context = mp.get_context("spawn")
     results: MethodResults = []
@@ -117,15 +129,15 @@ def evaluate_seed_split(
             executor.submit(
                 _evaluate_worker,
                 str(model_path),
-                chunk_paths,
-                start,
+                chunk_rels,
                 evaluation_seed + seed,
                 batch_size,
-                reference_env.max_activities,
-                reference_env.max_resources,
                 device,
+                loader,
+                name_fn,
+                start,
             )
-            for start, chunk_paths in chunks
+            for start, chunk_rels in chunks
         ]
         for future in futures:
             results.extend(future.result())
@@ -137,25 +149,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models-root",
         type=Path,
-        default=Path("outputs/experiments/ppo/makespan_only"),
-        help="directory containing seedN/<model-file> and seedN/splits.json",
+        default=Path("outputs/experiments/ppo"),
+        help="directory containing seedN/<model-file> checkpoints",
     )
     parser.add_argument(
         "--model-file",
         type=Path,
-        default=Path("checkpoints/best_model.zip"),
+        default=Path("final_model.zip"),
         help="checkpoint path relative to each seed directory",
     )
     parser.add_argument("--seeds", nargs="+", type=int, default=[17, 23, 31])
+    parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument(
-        "--baseline-results",
+        "--splits", type=Path, default=Path("splits.json"),
+        help="protocol file generated by scripts/make_splits.py",
+    )
+    parser.add_argument(
+        "--eval-groups",
+        default="psplib_j30",
+        help="comma-separated groups to evaluate: any evaluation group id from "
+             "splits.json and/or 'validation' (rg30_validation)",
+    )
+    parser.add_argument(
+        "--ref-rules",
         type=Path,
-        default=Path("outputs/baselines_mplib2_10_50_5/makespan_summary.csv"),
+        default=Path("outputs/rules_j30/makespan_summary.csv"),
+        help="baselines.py CSV covering the evaluated groups (optional)",
+    )
+    parser.add_argument(
+        "--ref-rule",
+        default="serial_LST",
+        help="column of --ref-rules used for the rule-relative gap",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/experiments/ppo/makespan_only/inference_search"),
+        default=Path("outputs/experiments/ppo/inference_search"),
     )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
@@ -168,12 +197,7 @@ def parse_args() -> argparse.Namespace:
         "--eval-max-instances",
         type=int,
         default=0,
-        help="evaluate at most N validation/test instances per split; 0 evaluates all",
-    )
-    parser.add_argument(
-        "--validation-only",
-        action="store_true",
-        help="skip test evaluation and write validation results only",
+        help="evaluate at most N instances per group; 0 evaluates all",
     )
     parser.add_argument(
         "--workers",
@@ -183,31 +207,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--torch-threads", type=int, default=20)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
-    parser.add_argument("--evaluation-seed", type=int, default=20260908)
+    parser.add_argument("--evaluation-seed", type=int, default=20260909)
     return parser.parse_args()
 
 
-def load_split_manifest(path: Path) -> dict[str, list[str]]:
+def load_reference_rules(path: Path, column: str) -> dict[str, int]:
     if not path.is_file():
-        raise FileNotFoundError(f"split manifest not found: {path}")
-    with path.open(encoding="utf-8") as stream:
-        splits = json.load(stream)
-    if not isinstance(splits, dict) or any(
-        split not in splits or not isinstance(splits[split], list) for split in SPLITS
-    ):
-        raise ValueError(f"invalid split manifest: {path}")
-    return splits
-
-
-def load_shared_splits(models_root: Path, seeds: list[int]) -> dict[str, list[str]]:
-    if not seeds:
-        raise ValueError("seeds must not be empty")
-    first = load_split_manifest(models_root / f"seed{seeds[0]}" / "splits.json")
-    for seed in seeds[1:]:
-        current = load_split_manifest(models_root / f"seed{seed}" / "splits.json")
-        if current != first:
-            raise ValueError("all seed split manifests must be identical")
-    return first
+        raise FileNotFoundError(f"--ref-rules not found: {path}")
+    with path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        if column not in (reader.fieldnames or ()):
+            raise ValueError(f"{path} is missing reference column {column!r}")
+        refs: dict[str, int] = {}
+        for raw in reader:
+            key = instance_id(raw["file"])
+            try:
+                refs[key] = int(float(raw[column]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{path}: invalid {column} for {raw.get('file')!r}") from exc
+    return refs
 
 
 def _aggregate(values: list[float]) -> tuple[float, float]:
@@ -220,24 +238,19 @@ def _aggregate(values: list[float]) -> tuple[float, float]:
 
 def calculate_metrics(
     results: MethodResults,
-    baseline_results: dict[str, dict[str, int]],
+    reference_rules: dict[str, int],
 ) -> dict[str, float | int]:
     names = [name for name, _ in results]
     ppo = np.asarray([makespan for _, makespan in results], dtype=np.float64)
-    fifo = np.asarray([baseline_results[name]["FIFO"] for name in names], dtype=np.float64)
-    cp_sat = np.asarray(
-        [baseline_results[name]["CP-SAT"] for name in names], dtype=np.float64
-    )
-    if np.any(fifo <= 0) or np.any(cp_sat <= 0):
-        raise ValueError("FIFO and CP-SAT makespans must be positive")
-    fifo_gap = (ppo - fifo) / fifo
-    cp_sat_gap = (ppo - cp_sat) / cp_sat
-    delta = ppo - fifo
+    rule = np.asarray([reference_rules[name] for name in names], dtype=np.float64)
+    if np.any(rule <= 0):
+        raise ValueError("reference rule makespans must be positive")
+    rule_gap = (ppo - rule) / rule
+    delta = ppo - rule
     return {
         "ppo_mean": float(ppo.mean()),
         "ppo_instance_std": float(ppo.std()),
-        "fifo_relative_gap": float(fifo_gap.mean()),
-        "cp_sat_relative_gap": float(cp_sat_gap.mean()),
+        "rule_relative_gap": float(rule_gap.mean()),
         "wins": int((delta < 0).sum()),
         "ties": int((delta == 0).sum()),
         "losses": int((delta > 0).sum()),
@@ -245,70 +258,61 @@ def calculate_metrics(
     }
 
 
-def write_split_summary(
+def write_group_summary(
     path: Path,
-    split: str,
-    paths: list[str],
+    group: str,
+    rels: list[str],
     results: MethodResults,
-    baseline_results: dict[str, dict[str, int]],
+    reference_rules: dict[str, int] | None,
 ) -> Path:
-    fields = [
-        "instance",
-        "split",
-        METHOD_NAME,
-        "FIFO",
-        "Shortest",
-        "Random",
-        "CP-SAT",
-    ]
     values = dict(results)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="ascii") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["instance", "group", METHOD_NAME, "serial_LST"]
+            if reference_rules
+            else ["instance", "group", METHOD_NAME],
+        )
         writer.writeheader()
-        for instance_path in paths:
-            instance = Path(instance_path).name
-            writer.writerow(
-                {
-                    "instance": instance,
-                    "split": split,
-                    METHOD_NAME: int(values[instance]),
-                    "FIFO": baseline_results[instance]["FIFO"],
-                    "Shortest": baseline_results[instance]["Shortest"],
-                    "Random": baseline_results[instance]["Random"],
-                    "CP-SAT": baseline_results[instance]["CP-SAT"],
-                }
-            )
+        for rel in rels:
+            name = instance_id(rel)
+            row = {
+                "instance": name,
+                "group": group,
+                METHOD_NAME: int(values[name]),
+            }
+            if reference_rules:
+                row["serial_LST"] = reference_rules.get(name, "")
+            writer.writerow(row)
     return path
 
 
 def write_per_seed_metrics(
     path: Path,
     seed_results: SeedResults,
-    baseline_results: dict[str, dict[str, int]],
+    groups: list[str],
+    reference_rules: dict[str, int] | None,
 ) -> Path:
-    fields = [
-        "seed",
-        "split",
-        "method",
-        "budget",
-        "ppo_mean",
-        "ppo_instance_std",
-        "fifo_relative_gap",
-        "cp_sat_relative_gap",
-        "wins",
-        "ties",
-        "losses",
-        "instances",
-    ]
+    fields = ["seed", "group", "method", "budget", "ppo_mean", "ppo_instance_std"]
+    if reference_rules:
+        fields += ["rule_relative_gap", "wins", "ties", "losses"]
+    fields += ["instances"]
     rows = []
-    for seed, split_results in seed_results.items():
-        for split, results in split_results.items():
-            metrics = calculate_metrics(results, baseline_results)
+    for seed, group_results in seed_results.items():
+        for group in groups:
+            results = group_results.get(group, [])
+            if not results:
+                continue
+            metrics = calculate_metrics(results, reference_rules) if reference_rules else {
+                "ppo_mean": float(np.mean([m for _, m in results])),
+                "ppo_instance_std": float(np.std([m for _, m in results])),
+                "instances": len(results),
+            }
             rows.append(
                 {
                     "seed": seed,
-                    "split": split,
+                    "group": group,
                     "method": METHOD_NAME,
                     "budget": SAMPLE_BUDGET,
                     **{
@@ -318,7 +322,7 @@ def write_per_seed_metrics(
                 }
             )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="ascii") as stream:
+    with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
@@ -328,65 +332,65 @@ def write_per_seed_metrics(
 def write_aggregate_metrics(
     path: Path,
     seed_results: SeedResults,
-    baseline_results: dict[str, dict[str, int]],
-    splits: tuple[str, ...] = SPLITS,
+    groups: list[str],
+    reference_rules: dict[str, int] | None,
 ) -> Path:
     fields = [
-        "split",
-        "method",
-        "budget",
-        "seeds",
-        "ppo_mean",
-        "ppo_seed_std",
+        "group", "method", "budget", "seeds", "ppo_mean", "ppo_seed_std",
         "ppo_instance_std_mean",
-        "fifo_relative_gap",
-        "fifo_gap_seed_std",
-        "cp_sat_relative_gap",
-        "cp_sat_gap_seed_std",
-        "wins",
-        "ties",
-        "losses",
-        "instances_per_seed",
     ]
+    if reference_rules:
+        fields += ["rule_relative_gap", "rule_gap_seed_std", "wins", "ties", "losses"]
+    fields += ["instances_per_seed"]
     rows = []
-    for split in splits:
-        seed_metrics = [
-            calculate_metrics(seed_results[seed][split], baseline_results)
-            for seed in seed_results
-            if split in seed_results[seed]
-        ]
+    for group in groups:
+        seed_metrics = []
+        for seed in seed_results:
+            results = seed_results[seed].get(group, [])
+            if not results:
+                continue
+            seed_metrics.append(
+                calculate_metrics(results, reference_rules) if reference_rules else {
+                    "ppo_mean": float(np.mean([m for _, m in results])),
+                    "ppo_instance_std": float(np.std([m for _, m in results])),
+                    "instances": len(results),
+                }
+            )
+        if not seed_metrics:
+            continue
         ppo_mean, ppo_seed_std = _aggregate(
             [float(metrics["ppo_mean"]) for metrics in seed_metrics]
         )
-        fifo_gap, fifo_gap_seed_std = _aggregate(
-            [float(metrics["fifo_relative_gap"]) for metrics in seed_metrics]
+        row: dict[str, object] = {
+            "group": group,
+            "method": METHOD_NAME,
+            "budget": SAMPLE_BUDGET,
+            "seeds": ",".join(str(seed) for seed in seed_results),
+            "ppo_mean": f"{ppo_mean:.4f}",
+            "ppo_seed_std": f"{ppo_seed_std:.4f}",
+            "ppo_instance_std_mean": (
+                f"{np.mean([float(metrics['ppo_instance_std']) for metrics in seed_metrics]):.4f}"
+            ),
+        }
+        if reference_rules:
+            gap, gap_std = _aggregate(
+                [float(metrics["rule_relative_gap"]) for metrics in seed_metrics]
+            )
+            row.update(
+                {
+                    "rule_relative_gap": f"{gap:.6f}",
+                    "rule_gap_seed_std": f"{gap_std:.6f}",
+                    "wins": sum(int(metrics["wins"]) for metrics in seed_metrics),
+                    "ties": sum(int(metrics["ties"]) for metrics in seed_metrics),
+                    "losses": sum(int(metrics["losses"]) for metrics in seed_metrics),
+                }
+            )
+        row["instances_per_seed"] = ",".join(
+            str(int(metrics["instances"])) for metrics in seed_metrics
         )
-        cp_sat_gap, cp_sat_gap_seed_std = _aggregate(
-            [float(metrics["cp_sat_relative_gap"]) for metrics in seed_metrics]
-        )
-        rows.append(
-            {
-                "split": split,
-                "method": METHOD_NAME,
-                "budget": SAMPLE_BUDGET,
-                "seeds": ",".join(str(seed) for seed in seed_results),
-                "ppo_mean": f"{ppo_mean:.4f}",
-                "ppo_seed_std": f"{ppo_seed_std:.4f}",
-                "ppo_instance_std_mean": f"{np.mean([float(metrics['ppo_instance_std']) for metrics in seed_metrics]):.4f}",
-                "fifo_relative_gap": f"{fifo_gap:.6f}",
-                "fifo_gap_seed_std": f"{fifo_gap_seed_std:.6f}",
-                "cp_sat_relative_gap": f"{cp_sat_gap:.6f}",
-                "cp_sat_gap_seed_std": f"{cp_sat_gap_seed_std:.6f}",
-                "wins": sum(int(metrics["wins"]) for metrics in seed_metrics),
-                "ties": sum(int(metrics["ties"]) for metrics in seed_metrics),
-                "losses": sum(int(metrics["losses"]) for metrics in seed_metrics),
-                "instances_per_seed": ",".join(
-                    str(int(metrics["instances"])) for metrics in seed_metrics
-                ),
-            }
-        )
+        rows.append(row)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="ascii") as stream:
+    with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
@@ -413,106 +417,94 @@ def main() -> None:
     if args.workers > 1 and args.device != "cpu":
         raise ValueError("--workers greater than 1 requires --device cpu")
 
-    splits = load_shared_splits(args.models_root, args.seeds)
-    eval_paths = {split: list(splits[split]) for split in SPLITS}
+    protocol = read_protocol(args.splits)
+    available = dict(protocol["evaluation"])
+    available["validation"] = protocol["validation"]
+    requested = [group for group in args.eval_groups.split(",") if group]
+    unknown = sorted(set(requested) - set(available))
+    if unknown:
+        raise ValueError(f"unknown eval groups: {unknown}; choose from {sorted(available)}")
+    eval_groups = {group: list(available[group]) for group in requested}
     if args.eval_max_instances:
-        eval_paths = {
-            split: paths[: args.eval_max_instances]
-            for split, paths in eval_paths.items()
+        eval_groups = {
+            group: rels[: args.eval_max_instances] for group, rels in eval_groups.items()
         }
-    all_paths = list(
-        dict.fromkeys(path for paths in splits.values() for path in paths)
-    )
-    baseline_results = load_baseline_results(
-        args.baseline_results, [Path(path).name for path in all_paths]
-    )
-    instances = {path: parse_rcmp(path) for path in all_paths}
-    max_activities = max(len(instance.activities) for instance in instances.values())
-    max_resources = max(instance.resource_count for instance in instances.values())
-    reference_env = SimpleNamespace(
-        max_activities=max_activities,
-        max_resources=max_resources,
-    )
-    validation_cache = build_static_graph_cache(
-        [instances[path] for path in eval_paths["validation"]],
-        max_activities=max_activities,
-        max_resources=max_resources,
-    )
-    test_cache = build_static_graph_cache(
-        [instances[path] for path in eval_paths["test"]],
-        max_activities=max_activities,
-        max_resources=max_resources,
-    )
+
+    loader = loader_for(args.data_root)
+    name_fn = instance_id
+    reference_rules = None
+    if args.ref_rules is not None:
+        reference_rules = load_reference_rules(args.ref_rules, args.ref_rule)
+        missing = [
+            rel
+            for rels in eval_groups.values()
+            for rel in rels
+            if name_fn(rel) not in reference_rules
+        ]
+        if missing:
+            raise ValueError(
+                f"--ref-rules does not cover {len(missing)} evaluation instances; "
+                f"first missing: {missing[0]}"
+            )
 
     seed_results: SeedResults = {}
     for seed in args.seeds:
         model_path = args.models_root / f"seed{seed}" / args.model_file
         if not model_path.is_file():
             raise FileNotFoundError(f"PPO model not found: {model_path}")
-        print(f"evaluating validation seed={seed}: {model_path}")
-        seed_results[seed] = {
-            "validation": evaluate_seed_split(
+        print(f"evaluating seed={seed}: {model_path}")
+        seed_results[seed] = {}
+        for group, rels in eval_groups.items():
+            if not rels:
+                continue
+            print(f"  group {group} (n={len(rels)})")
+            seed_results[seed][group] = evaluate_group(
                 model_path,
-                eval_paths["validation"],
+                rels,
                 seed,
-                args.evaluation_seed,
-                reference_env,
-                validation_cache,
                 args.eval_batch_size,
                 args.device,
+                loader,
+                name_fn,
                 args.workers,
-            )
-        }
-        if not args.validation_only:
-            print(f"evaluating test seed={seed}: {model_path}")
-            seed_results[seed]["test"] = evaluate_seed_split(
-                model_path,
-                eval_paths["test"],
-                seed,
                 args.evaluation_seed,
-                reference_env,
-                test_cache,
-                args.eval_batch_size,
-                args.device,
-                args.workers,
             )
 
+    groups = [group for group in eval_groups if any(group in seed_results[s] for s in args.seeds)]
     for seed in args.seeds:
         seed_dir = args.output_dir / f"seed{seed}"
-        write_split_summary(
-            seed_dir / "validation_search_summary.csv",
-            "validation",
-            eval_paths["validation"],
-            seed_results[seed]["validation"],
-            baseline_results,
-        )
-        if not args.validation_only:
-            write_split_summary(
-                seed_dir / "test_search_summary.csv",
-                "test",
-                eval_paths["test"],
-                seed_results[seed]["test"],
-                baseline_results,
+        for group in groups:
+            if group not in seed_results[seed]:
+                continue
+            write_group_summary(
+                seed_dir / f"{group}_search_summary.csv",
+                group,
+                eval_groups[group],
+                seed_results[seed][group],
+                reference_rules,
             )
     write_per_seed_metrics(
-        args.output_dir / "per_seed_metrics.csv", seed_results, baseline_results
+        args.output_dir / "per_seed_metrics.csv", seed_results, groups, reference_rules
     )
     write_aggregate_metrics(
-        args.output_dir / "aggregate.csv", seed_results, baseline_results
+        args.output_dir / "aggregate.csv", seed_results, groups, reference_rules
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with (args.output_dir / "search_config.json").open(
-        "w", encoding="ascii"
+        "w", encoding="utf-8"
     ) as stream:
         json.dump(
             {
-                "reward_function": "makespan_only",
+                "protocol": str(args.splits),
+                "data_root": str(args.data_root),
                 "method": METHOD_NAME,
                 "sample_trajectories": SAMPLE_BUDGET,
                 "model_root": str(args.models_root),
                 "model_file": str(args.model_file),
                 "seeds": args.seeds,
-                "validation_only": args.validation_only,
+                "groups": groups,
+                "reference_rules": str(args.ref_rules) if reference_rules else None,
+                "reference_rule": args.ref_rule if reference_rules else None,
                 "evaluation_seed": args.evaluation_seed,
                 "device": args.device,
                 "eval_batch_size": args.eval_batch_size,

@@ -1,16 +1,23 @@
-"""RCMPSP instance parsing, serial schedule generation, and validation."""
+"""Core RCPSP instance types, schedule generation, and validation.
+
+Single-project RCPSP instances are parsed by ``src.data.parsers`` and adapted
+by ``src.data.adapter``; this module owns the DAG ``Instance`` representation,
+the serial/parallel schedule-generation schemes (SGS) and schedule validation
+used by every baseline and by the RL environment.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 import random
 
 import numpy as np
 
 
-ActivityId = tuple[int, int]
+# A single-project activity is identified by its 0-indexed position in the
+# source file (activity 0 = dummy source, n-1 = dummy sink).
+ActivityId = int
 
 
 @dataclass(frozen=True)
@@ -40,78 +47,12 @@ class Schedule:
     makespan: int
 
 
-def parse_rcmp(path: str | Path) -> Instance:
-    """Parse an MPSPLIB RCMP file into activities with integer demands."""
-    path = Path(path)
-    lines = [line.split() for line in path.read_text().splitlines() if line.split()]
-    cursor = 0
-
-    project_count = int(lines[cursor][0])
-    cursor += 1
-    resource_count = int(lines[cursor][0])
-    cursor += 1
-    capacities = tuple(map(int, lines[cursor]))
-    cursor += 1
-    if len(capacities) != resource_count:
-        raise ValueError(f"{path}: expected {resource_count} resource capacities")
-
-    activities: dict[ActivityId, Activity] = {}
-    predecessors: dict[ActivityId, list[ActivityId]] = {}
-
-    for project in range(1, project_count + 1):
-        activity_count = int(lines[cursor][0])
-        cursor += 1
-        # The following availability vector identifies usable resource columns for
-        # this project. Demands already encode unavailable resources as zero.
-        availability = tuple(map(int, lines[cursor]))
-        cursor += 1
-        if len(availability) != resource_count:
-            raise ValueError(f"{path}: project {project} has invalid availability vector")
-
-        for activity_no in range(1, activity_count + 1):
-            row = lines[cursor]
-            cursor += 1
-            minimum_columns = 1 + resource_count + 1
-            if len(row) < minimum_columns:
-                raise ValueError(f"{path}: truncated activity row for {project}:{activity_no}")
-
-            duration = int(row[0])
-            demand = tuple(map(int, row[1 : 1 + resource_count]))
-            successor_count = int(row[1 + resource_count])
-            successor_tokens = row[2 + resource_count :]
-            if len(successor_tokens) != successor_count:
-                raise ValueError(f"{path}: invalid successor count for {project}:{activity_no}")
-            if any(value < 0 for value in demand) or duration < 0:
-                raise ValueError(f"{path}: negative duration or demand for {project}:{activity_no}")
-
-            successors = tuple(tuple(map(int, token.split(":"))) for token in successor_tokens)
-            activity_id = (project, activity_no)
-            activities[activity_id] = Activity(activity_id, duration, demand, successors)
-            predecessors.setdefault(activity_id, [])
-            for successor in successors:
-                predecessors.setdefault(successor, []).append(activity_id)
-
-    if cursor != len(lines):
-        raise ValueError(f"{path}: unexpected trailing content")
-    if any(successor not in activities for activity in activities.values() for successor in activity.successors):
-        raise ValueError(f"{path}: successor references an unknown activity")
-    if any(any(demand > capacity for demand, capacity in zip(activity.demand, capacities)) for activity in activities.values()):
-        raise ValueError(f"{path}: an activity demand exceeds a resource capacity")
-
-    return Instance(
-        name=path.stem,
-        capacities=capacities,
-        activities=activities,
-        predecessors={key: tuple(value) for key, value in predecessors.items()},
-    )
+def priority_fifo(activity: Activity) -> int:
+    return activity.id
 
 
-def priority_fifo(activity: Activity) -> tuple[int, int, int]:
-    return (activity.id[0], activity.id[1], 0)
-
-
-def priority_shortest_duration(activity: Activity) -> tuple[int, int, int]:
-    return (activity.duration, activity.id[0], activity.id[1])
+def priority_shortest_duration(activity: Activity) -> tuple[int, int]:
+    return (activity.duration, activity.id)
 
 
 def random_priorities(instance: Instance, seed: int) -> dict[ActivityId, float]:
@@ -126,6 +67,43 @@ def baseline_makespans(instance: Instance, seed: int) -> dict[str, int]:
         "shortest": generate_schedule(instance, priority_shortest_duration).makespan,
         "random": generate_schedule(instance, random_priorities(instance, seed)).makespan,
     }
+
+
+def latest_start_times(instance: Instance, horizon: int | None = None) -> dict[ActivityId, int]:
+    """Backward-pass latest start times.
+
+    ``horizon`` defaults to the total duration sum (the same safe upper bound
+    the environment uses).  For every activity, LFT(a) = min over successors s
+    of LST(s), and LST(a) = LFT(a) - duration(a).  A sink activity therefore
+    gets LST = horizon.  Recursion is memoised and terminates because the
+    precedence graph is a DAG.
+    """
+    if horizon is None:
+        horizon = sum(activity.duration for activity in instance.activities.values())
+
+    lft_cache: dict[ActivityId, int] = {}
+
+    def latest_start(activity_id: ActivityId) -> int:
+        activity = instance.activities[activity_id]
+        return latest_finish(activity_id) - activity.duration
+
+    def latest_finish(activity_id: ActivityId) -> int:
+        cached = lft_cache.get(activity_id)
+        if cached is not None:
+            return cached
+        activity = instance.activities[activity_id]
+        bound = min((latest_start(succ) for succ in activity.successors), default=horizon)
+        lft_cache[activity_id] = bound
+        return bound
+
+    return {activity_id: latest_start(activity_id) for activity_id in instance.activities}
+
+
+def priority_latest_start(instance: Instance) -> Callable[[Activity], object]:
+    """Priority rule LST: schedule the eligible activity with the smallest
+    latest start time first; ties break by activity id for determinism."""
+    latest = latest_start_times(instance)
+    return lambda activity: (latest[activity.id], activity.id)
 
 
 def generate_schedule(
@@ -160,6 +138,134 @@ def generate_schedule(
         activity_id = min(eligible, key=lambda item: rank(instance.activities[item]))
         serial_sgs_insert(instance, activity_id, starts, finishes, usage)
         unscheduled.remove(activity_id)
+
+    schedule = Schedule(starts=starts, finishes=finishes, makespan=max(finishes.values(), default=0))
+    validate_schedule(instance, schedule)
+    return schedule
+
+
+def generate_schedule_parallel(
+    instance: Instance,
+    priority: Callable[[Activity], object] | dict[ActivityId, float] = priority_fifo,
+    *,
+    wcs: bool = False,
+) -> Schedule:
+    """Build a feasible schedule with the parallel (time-increment) SGS.
+
+    At every schedule time ``t`` the precedence-eligible activities are scanned
+    in priority order and every activity that fits into the remaining capacity
+    is started at ``t``.  Time then advances to the next activity finish where
+    capacity/eligibility may change.  ``priority`` follows the same conventions
+    as :func:`generate_schedule` (callable sort key or ``{id: score}`` map with
+    higher scores scheduled first; ties broken by ascending activity id).
+
+    With ``wcs=True`` the Kolisch (1996) worst-case-slack rule is used instead
+    of a static priority.  Among the activities that are precedence-eligible
+    and resource-feasible at ``t``, the next one started minimises
+
+        WCS(j) = LST(j) - max_{i != j in the decision set} E(i, j),
+
+    where E(i, j) is the earliest feasible start time of ``j`` once ``i`` is
+    started at ``t``.  The rule prefers the activity that would be delayed past
+    its latest start the most if any other eligible activity were started now.
+    """
+    if wcs:
+        latest = latest_start_times(instance)
+    ids = tuple(sorted(instance.activities))
+    durations = {aid: instance.activities[aid].duration for aid in ids}
+    demands = {aid: instance.activities[aid].demand for aid in ids}
+    capacities = np.asarray(instance.capacities, dtype=np.int32)
+    horizon = sum(durations.values())
+    usage = np.zeros((horizon + 1, instance.resource_count), dtype=np.int32)
+    starts: dict[ActivityId, int] = {}
+    finishes: dict[ActivityId, int] = {}
+
+    def feasible_at(activity_id: ActivityId, t: int) -> bool:
+        duration = durations[activity_id]
+        if duration == 0:
+            return True
+        limit = capacities - np.asarray(demands[activity_id], dtype=np.int32)
+        return bool(np.all(usage[t : t + duration] <= limit))
+
+    def reserve(activity_id: ActivityId, t: int) -> None:
+        duration = durations[activity_id]
+        starts[activity_id] = t
+        finishes[activity_id] = t + duration
+        if duration:
+            usage[t : t + duration] += np.asarray(demands[activity_id], dtype=np.int32)
+
+    def rank(activity: Activity) -> object:
+        if isinstance(priority, dict):
+            return (-priority[activity.id], activity.id)
+        return priority(activity)
+
+    t = 0
+    while len(finishes) < len(ids):
+        changed = True
+        while changed:
+            changed = False
+            eligible = [
+                aid
+                for aid in ids
+                if aid not in finishes
+                and all(
+                    pred in finishes and finishes[pred] <= t
+                    for pred in instance.predecessors[aid]
+                )
+            ]
+            if not eligible:
+                break
+            if wcs:
+                startable = [aid for aid in eligible if feasible_at(aid, t)]
+                if not startable:
+                    break
+                best: ActivityId | None = None
+                best_key: tuple[float, ActivityId] | None = None
+                for candidate in startable:
+                    if len(startable) == 1:
+                        worst_delay = t
+                    else:
+                        worst_delay = -1
+                        for other in startable:
+                            if other == candidate:
+                                continue
+                            if durations[other] == 0:
+                                probe = usage
+                            else:
+                                probe = usage.copy()
+                                probe[t : t + durations[other]] += np.asarray(
+                                    demands[other], dtype=np.int32
+                                )
+                            earliest = _earliest_feasible_start(
+                                probe,
+                                capacities=instance.capacities,
+                                demand=demands[candidate],
+                                duration=durations[candidate],
+                                earliest=t,
+                            )
+                            if earliest > worst_delay:
+                                worst_delay = earliest
+                    key = (float(latest[candidate] - worst_delay), candidate)
+                    if best_key is None or key < best_key:
+                        best_key = key
+                        best = candidate
+                if best is not None:
+                    reserve(best, t)
+                    changed = True
+            else:
+                ordered = sorted(eligible, key=lambda aid: rank(instance.activities[aid]))
+                for aid in ordered:
+                    if aid in finishes:
+                        continue
+                    if feasible_at(aid, t):
+                        reserve(aid, t)
+                        changed = True
+        next_t = min((finish for finish in finishes.values() if finish > t), default=None)
+        if next_t is None:
+            if len(finishes) < len(ids):
+                raise RuntimeError("parallel SGS stalled before scheduling every activity")
+            break
+        t = next_t
 
     schedule = Schedule(starts=starts, finishes=finishes, makespan=max(finishes.values(), default=0))
     validate_schedule(instance, schedule)

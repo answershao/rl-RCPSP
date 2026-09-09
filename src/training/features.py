@@ -9,7 +9,7 @@ import torch as th
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from torch import nn
 
-from src.environments.observation import (
+from src.envs.observation import (
     DYNAMIC_ACTIVITY_FEATURE_COUNT,
     ObservationLayout,
     StaticGraphCache,
@@ -67,7 +67,7 @@ def _aggregate_edge_messages(
 
 
 class SharedDirectedGINExtractor(BaseFeaturesExtractor):
-    """Encode an RCMPSP graph once for both policy and value estimation."""
+    """Encode an RCPSP graph once for both policy and value estimation."""
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         self.layout = ObservationLayout(max_activities, max_resources)
         if observation_space.shape != (self.layout.size,):
             raise ValueError(
-                f"expected flattened RCMPSP observation {(self.layout.size,)}, "
+                f"expected flattened RCPSP observation {(self.layout.size,)}, "
                 f"got {observation_space.shape}"
             )
         features_dim = max_activities * embedding_dim + global_dim + 2 * max_activities

@@ -1,33 +1,40 @@
-# tests/test_parser_all.py — full-corpus parse & sanity check
-import sys, glob, time
+"""Full-corpus (4430) parse + structural sanity — slow integration test."""
 
-sys.path.insert(0, "src")
-from rcpsp_data import load_instance
+import time
 
-files = sorted(glob.glob("data/psplib/**/*.sm", recursive=True)) + sorted(
-    glob.glob("data/oras/**/*.rcp", recursive=True)
-)
+import pytest
 
-print(f"total files: {len(files)}")
+from src.data.parsers import load_instance
 
-bad, t0 = [], time.time()
-for k, f in enumerate(files):
-    try:
-        inst = load_instance(f)
-        order = inst.topological_order()
-        assert len(order) == inst.n_activities
-        # every duration >= 0, dummy source/sink have 0 duration
-        assert inst.durations.min() >= 0
-        assert inst.durations[0] == 0 and inst.durations[-1] == 0
-        # demands never exceed capacity (feasibility sanity)
-        assert (inst.demands <= inst.capacities).all()
-    except Exception as e:
-        bad.append((f, repr(e)))
-    if (k + 1) % 500 == 0:
-        print(f"  {k+1}/{len(files)} ({time.time()-t0:.0f}s)")
+EXPECTED_COUNT = 4430  # 2040 .sm (PSPLIB j30-j120) + 2390 .rcp (RG30/RG300/Patterson)
 
-print(f"\nparsed OK: {len(files) - len(bad)}/{len(files)}  ({time.time()-t0:.0f}s)")
-for f, e in bad[:20]:
-    print("FAIL:", f, e)
-if not bad:
-    print("FULL CORPUS PASSED")
+
+def _corpus_files(repo_root):
+    sm = sorted((repo_root / "data/psplib").glob("**/*.sm"))
+    rcp = sorted((repo_root / "data/oras").glob("**/*.rcp"))
+    return sm + rcp
+
+
+@pytest.mark.slow
+def test_full_corpus_parse_and_sanity(repo_root):
+    files = _corpus_files(repo_root)
+    assert len(files) == EXPECTED_COUNT, (
+        f"corpus changed: found {len(files)} files, expected {EXPECTED_COUNT}"
+    )
+
+    bad = []
+    t0 = time.time()
+    for index, path in enumerate(files):
+        try:
+            inst = load_instance(path)
+            order = inst.topological_order()
+            assert len(order) == inst.n_activities
+            assert inst.durations.min() >= 0
+            assert inst.durations[0] == 0 and inst.durations[-1] == 0  # dummy source/sink
+            assert (inst.demands <= inst.capacities).all()  # feasibility sanity
+        except Exception as exc:  # noqa: BLE001 - report any per-file failure
+            bad.append((str(path), repr(exc)))
+        if (index + 1) % 1000 == 0:
+            print(f"  {index + 1}/{len(files)} ({time.time() - t0:.0f}s)")
+
+    assert not bad, f"{len(bad)} corpus failures, first: {bad[:5]}"

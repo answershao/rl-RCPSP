@@ -14,7 +14,8 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
 export PYTHONUNBUFFERED=1
 
 MODEL_DIR="${MODEL_DIR:-outputs/experiments/ppo/cpu_baseline}"
-SPLITS_PATH="${SPLITS_PATH:-outputs/manifests/cpu_baseline/splits.json}"
+DATA_ROOT="${DATA_ROOT:-data}"
+SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
 MODEL_PATH="${MODEL_DIR}/final_model.zip"
@@ -28,16 +29,17 @@ LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo}"
 mkdir -p "${LOG_DIR}"
 EVAL_LOG_FILE="${LOG_DIR}/eval_cpu_baseline_$(date +%Y%m%d_%H%M%S).log"
 
+# --evaluate-only with no --eval-suites evaluates every evaluation group in
+# splits.json (PSPLIB j30-j120 / RG300 / Patterson), the final-model protocol.
 nohup python -m scripts.train_ppo \
-    --instances-root data/MPLIB2_train_10_50_5 \
+    --data-root "${DATA_ROOT}" \
     --evaluate-only \
+    --splits "${SPLITS_PATH}" \
     --device cpu \
     --torch-threads "${TORCH_THREADS}" \
     --torch-interop-threads 1 \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --seed 17 \
-    --splits "${SPLITS_PATH}" \
-    --baseline-results outputs/baselines_mplib2_10_50_5/makespan_summary.csv \
     --output-dir "${MODEL_DIR}" \
     "$@" >"${EVAL_LOG_FILE}" 2>&1 &
 

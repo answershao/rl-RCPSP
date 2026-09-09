@@ -1,212 +1,125 @@
 #!/usr/bin/env python3
-"""Evaluate scheduling baselines on the MPLIB2 10-project/500-activity training set."""
+"""Single-pass priority-rule baselines over the four single-project RCPSP suites.
+
+Instances are discovered under ``--data-root``:
+
+  PSPLIB    data/psplib/{j30,j60,j90,j120}/*.sm   (BKS known, main benchmark)
+  RG30      data/oras/RCPSP/RG30/**/*.rcp         (large training pool, 5 sets)
+  RG300     data/oras/RCPSP/RG300/*.rcp           (large generalisation test)
+  Patterson data/oras/RCPSP/Patterson/*.rcp       (supplementary)
+
+Every instance is parsed by the unified parser (``src.data.parsers``), adapted
+to the core ``Instance`` shape (``src.data.adapter``) and scheduled once per
+(rule, scheme) pair.  Static rules run under both the serial and the parallel
+SGS; WCS (Kolisch 1996) is parallel-only.  Output is an instance x method
+makespan matrix in ``--output-csv``.
+
+Runner plumbing (suite discovery, process pool, CSV writing) lives in
+``scripts.common`` and is shared with ``scripts/run_ga.py`` /
+``scripts/run_gphh.py``.
+"""
 
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import csv
-from multiprocessing import get_context
 from pathlib import Path
-import re
 import sys
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np
-
-from src.core.exact import solve_exact
-from src.core.rcmpsp import baseline_makespans, parse_rcmp
-
-
-_INSTANCE_NAME_PATTERN = re.compile(
-    r"^MPLIB2_Set(?P<set_number>\d+)_(?P<instance_number>\d+)\.rcmp$",
-    re.IGNORECASE,
+from scripts.common import (
+    add_instance_args,
+    jobs_for_suites,
+    map_jobs,
+    print_suite_means,
+    resolve_suite_ids,
+    validate_instance_args,
+    write_csv,
 )
-
-
-def instance_sort_key(path: Path) -> tuple[int, int, int, str]:
-    """Sort MPLIB2 files by numeric set and instance numbers."""
-    match = _INSTANCE_NAME_PATTERN.fullmatch(path.name)
-    if match is None:
-        # Keep unexpected names deterministic, after the standard names.
-        return (1, 0, 0, path.name)
-    return (
-        0,
-        int(match.group("set_number")),
-        int(match.group("instance_number")),
-        path.name,
-    )
+from src.core.rules import available_columns, all_makespans, column_name
+from src.data.adapter import load_core_instance
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--instances-root",
-        type=Path,
-        default=Path("data/MPLIB2_train_10_50_5"),
-        help="directory containing the .rcmp baseline instances",
-    )
+    add_instance_args(parser, workers_flag="--instance-workers")
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path(
-            "outputs/baselines/runs/mplib2_10_50_5/makespan_summary.csv"
-        ),
-        help=(
-            "path for a new baseline matrix; the fixed reference remains at "
-            "outputs/baselines_mplib2_10_50_5/makespan_summary.csv"
-        ),
-    )
-    parser.add_argument("--seed", type=int, default=7, help="seed for the random-priority baseline")
-    parser.add_argument(
-        "--max-instances",
-        type=int,
-        default=0,
-        help="evaluate at most this many instances; 0 evaluates all",
-    )
-    parser.add_argument(
-        "--exact-time-limit",
-        type=float,
-        default=0.0,
-        help="CP-SAT seconds per instance; use 0 to omit the CP-SAT column.",
-    )
-    parser.add_argument("--exact-workers", type=int, default=1, help="CP-SAT workers; 1 is reproducible.")
-    parser.add_argument(
-        "--instance-workers",
-        type=int,
-        default=1,
-        help="number of instances to solve concurrently in separate processes",
+        default=Path("outputs/baselines_rcpsp_4430/makespan_summary.csv"),
     )
     return parser.parse_args()
 
 
-def find_instances(root: Path) -> list[Path]:
-    """Return every RCMP file in a prepared instance directory."""
-    paths = sorted(root.glob("*.rcmp"), key=instance_sort_key)
-    if not paths:
-        raise ValueError(f"no .rcmp instances found under {root}")
-    return paths
-
-
 def evaluate_instance(
-    path: Path, seed: int, exact_time_limit: float, exact_workers: int
-) -> tuple[dict[str, float | int | str], str]:
-    """Evaluate one instance in a process-pool-compatible function."""
-    instance = parse_rcmp(path)
-    baselines = baseline_makespans(instance, seed)
-    row: dict[str, float | int | str] = {
+    path: Path, suite: str, seed: int, data_root: Path
+) -> dict[str, float | int | str]:
+    """Evaluate one instance (process-pool compatible)."""
+    instance = load_core_instance(path)
+    makespans = all_makespans(instance, seed=seed)
+    return {
+        "suite": suite,
         "instance": path.name,
-        "FIFO": baselines["fifo"],
-        "Shortest": baselines["shortest"],
-        "Random": baselines["random"],
+        "file": str(path.relative_to(data_root)),
+        "n_activities": len(instance.activities),
+        "n_resources": instance.resource_count,
+        **makespans,
     }
-    exact_details = ""
-    if exact_time_limit:
-        exact = solve_exact(
-            instance, time_limit=exact_time_limit, workers=exact_workers
-        )
-        row["CP-SAT"] = exact.schedule.makespan
-        row["Remark"] = exact.status.lower()
-        row["Bound"] = exact.best_bound
-        row["Wall Time"] = exact.wall_time
-        exact_details = (
-            f" CP-SAT={row['CP-SAT']} ({exact.status}; "
-            f"bound={exact.best_bound:.0f}; {exact.wall_time:.2f}s)"
-        )
-    return row, exact_details
 
 
-def print_result(row: dict[str, float | int | str], exact_details: str) -> None:
-    print(
-        f"{row['instance']}: FIFO={row['FIFO']} Shortest={row['Shortest']} "
-        f"Random={row['Random']}" + exact_details,
-        flush=True,
+def print_result(row: dict[str, float | int | str]) -> None:
+    serial = " ".join(
+        f"{column_name('serial', rule)}={row[column_name('serial', rule)]}"
+        for rule in ("FIFO", "LST", "LFT", "MTS", "GRPW")
     )
-
-
-def evaluate_instances(
-    paths: list[Path], *, seed: int, exact_time_limit: float,
-    exact_workers: int, instance_workers: int,
-) -> list[dict[str, float | int | str]]:
-    """Evaluate instances concurrently while retaining input order."""
-    if instance_workers == 1:
-        rows = []
-        for path in paths:
-            row, exact_details = evaluate_instance(
-                path, seed, exact_time_limit, exact_workers
-            )
-            print_result(row, exact_details)
-            rows.append(row)
-        return rows
-
-    ordered_rows: list[dict[str, float | int | str] | None] = [None] * len(paths)
-    context = get_context("spawn")
-    with ProcessPoolExecutor(max_workers=instance_workers, mp_context=context) as executor:
-        futures = {
-            executor.submit(
-                evaluate_instance, path, seed, exact_time_limit, exact_workers
-            ): index
-            for index, path in enumerate(paths)
-        }
-        for future in as_completed(futures):
-            row, exact_details = future.result()
-            ordered_rows[futures[future]] = row
-            print_result(row, exact_details)
-
-    if any(row is None for row in ordered_rows):
-        raise RuntimeError("one or more instance evaluations did not return a result")
-    return [row for row in ordered_rows if row is not None]
+    parallel = (
+        f"parallel_FIFO={row['parallel_FIFO']} parallel_LST={row['parallel_LST']} "
+        f"parallel_WCS={row['parallel_WCS']}"
+    )
+    print(f"{row['suite']}/{row['instance']}: {serial} | {parallel}", flush=True)
 
 
 def write_summary(
-    rows: list[dict[str, float | int | str]], output_csv: Path, *, include_exact: bool
+    rows: list[dict[str, float | int | str]],
+    output_csv: Path,
+    *,
+    schemes: tuple[str, ...],
 ) -> Path:
-    """Write the instance-by-method makespan matrix."""
-    methods = ["FIFO", "Shortest", "Random"]
-    metadata = []
-    if include_exact:
-        methods.append("CP-SAT")
-        metadata = ["Remark", "Bound", "Wall Time"]
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with output_csv.open("w", newline="", encoding="ascii") as output_file:
-        writer = csv.DictWriter(
-            output_file, fieldnames=["instance", *methods, *metadata]
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    columns = available_columns(schemes)
+    write_csv(
+        rows,
+        output_csv,
+        fieldnames=["suite", "instance", "file", "n_activities", "n_resources", *columns],
+    )
     print(f"makespan summary: {output_csv}")
-    print(
-        "mean: " + " ".join(
-            f"{method}={np.mean([row[method] for row in rows]):.2f}"
-            for method in methods
-        )
+    print_suite_means(
+        rows,
+        ("serial_FIFO", "serial_LST", "serial_LFT", "parallel_LST", "parallel_WCS"),
     )
     return output_csv
 
 
 def main() -> None:
     args = parse_args()
-    if args.exact_time_limit < 0:
-        raise ValueError("--exact-time-limit must be non-negative")
-    if args.exact_workers < 1:
-        raise ValueError("--exact-workers must be positive")
-    if args.instance_workers < 1:
-        raise ValueError("--instance-workers must be positive")
-    if args.max_instances < 0:
-        raise ValueError("--max-instances must be non-negative")
-    paths = find_instances(args.instances_root)
-    if args.max_instances:
-        paths = paths[:args.max_instances]
-    rows = evaluate_instances(
-        paths,
-        seed=args.seed,
-        exact_time_limit=args.exact_time_limit,
-        exact_workers=args.exact_workers,
-        instance_workers=min(args.instance_workers, len(paths)),
+    validate_instance_args(args.max_instances, args.instance_workers)
+    suite_ids = resolve_suite_ids(args.suites)
+    schemes = ("serial", "parallel")
+
+    jobs = jobs_for_suites(
+        args.data_root, suite_ids, args.max_instances, args.seed, args.data_root
     )
-    write_summary(rows, args.output_csv, include_exact=bool(args.exact_time_limit))
+    rows = (
+        map_jobs(
+            evaluate_instance,
+            jobs,
+            workers=min(args.instance_workers, len(jobs)),
+            on_result=print_result,
+        )
+        if jobs
+        else []
+    )
+    write_summary(rows, args.output_csv, schemes=schemes)
 
 
 if __name__ == "__main__":

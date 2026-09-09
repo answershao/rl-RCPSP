@@ -1,4 +1,4 @@
-"""Stable-Baselines3 callbacks for RCMPSP-specific training diagnostics."""
+"""Stable-Baselines3 callbacks for RCPSP-specific training diagnostics."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ TERMINAL_METRICS = (
 )
 
 
-class RCMPSPMetricsCallback(BaseCallback):
+class RCPSPMetricsCallback(BaseCallback):
     """Log rolling task metrics from terminal environment ``info`` dictionaries."""
 
     def __init__(
@@ -86,7 +86,7 @@ class RCMPSPMetricsCallback(BaseCallback):
     def _on_rollout_end(self) -> None:
         for name, values in self._values.items():
             if values:
-                self.logger.record(f"rcmpsp/{name}_mean", float(np.mean(values)))
+                self.logger.record(f"rcpsp/{name}_mean", float(np.mean(values)))
 
         self._rollouts += 1
 

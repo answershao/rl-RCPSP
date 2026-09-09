@@ -1,4 +1,9 @@
-"""Dynamic observations and static graph caches for RCMPSP policies."""
+"""Dynamic observations and static graph caches for RCPSP policies.
+
+Observations target single-project RCPSP instances (0-indexed activity ids)
+produced by ``src.data.adapter``; padded multi-instance environments keep
+the shapes fixed across the j30-j120 / RG300 activity range.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +12,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.core.rcmpsp import Instance
+from src.core.rcpsp import Instance
 
 
-# MPLIB2 10-project/500-activity dummy start nodes fan out to 24 activities.
-MAX_SUCCESSORS = 24
+# Upper bound over per-activity successor counts across the whole single-project
+# corpus.  PSPLIB j30-j120 fan out to at most 24, RG30 reaches 25 and the large
+# RG300 generalization set reaches 89, so the policy-side successor tensor needs
+# this headroom to keep one model valid across every suite.
+MAX_SUCCESSORS = 96
 RESOURCE_PROFILE_BIN_COUNT = 16
 RESOURCE_PROFILE_CHANNEL_COUNT = 2
 RESOURCE_PROFILE_FEATURE_COUNT = (
@@ -147,9 +155,9 @@ def build_static_graph_cache(
         }
         horizon = max(sum(item.duration for item in instance.activities.values()), 1)
         capacity_scale = np.maximum(np.asarray(instance.capacities, dtype=np.float32), 1.0)
-        longest_paths: dict[tuple[int, int], int] = {}
+        longest_paths: dict[int, int] = {}
 
-        def downstream_duration(activity_id: tuple[int, int]) -> int:
+        def downstream_duration(activity_id: int) -> int:
             if activity_id not in longest_paths:
                 activity = instance.activities[activity_id]
                 longest_paths[activity_id] = activity.duration + max(

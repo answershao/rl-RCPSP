@@ -1,1 +1,1 @@
-"""Training and evaluation helpers for RCMPSP policies."""
+"""Training and evaluation helpers for RCPSP policies."""

@@ -1,1 +1,1 @@
-"""RCMPSP scheduling algorithms, environments, and training entry points."""
+"""RCPSP scheduling algorithms, environments, and training entry points."""
