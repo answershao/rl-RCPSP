@@ -8,15 +8,22 @@ script appends ``bks`` and ``gap_<method>`` columns
 is below BKS (prints an alert row by row instead).
 
 Outputs (under ``--out-dir``):
-  merged_detail.csv     one row per instance; rules subset + GA + GPHH + BKS
-  summary_by_suite.csv  per suite x method: n, mean makespan, mean gap %,
-                        # instances reaching BKS, # times best among methods
+  merged_detail.csv      one row per instance; rules subset + GA + GPHH + BKS
+  summary_by_suite.csv   per suite x method: n, mean makespan, mean gap %,
+                         # instances reaching BKS, # times best among methods
+  summary_by_regime.csv  optional (with ``--params``): per suite x RF level x
+                         RS quartile x method.  Aggregated means hide that
+                         tight instances are far harder than loose ones (j30
+                         serial_LST gap: 11.98% tightest quartile vs 0.40%
+                         loosest), so the main line reports per regime.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 from pathlib import Path
+
+import numpy as np
 
 # Columns kept from the full rule CSV for the detail/summary tables.
 RULE_SUBSET = ["serial_FIFO", "serial_SPT", "serial_LST", "serial_LFT",
@@ -45,6 +52,16 @@ def to_int(row: dict[str, str], col: str) -> int | None:
         return None
 
 
+def to_float(row: dict[str, str], col: str) -> float | None:
+    v = row.get(col)
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def discover_rule_cols(rows: list[dict[str, str]]) -> list[str]:
     cols = list(rows[0].keys()) if rows else []
     return [c for c in cols if c.startswith(RULE_SUBSET_PREFIX[0]) or
@@ -58,6 +75,12 @@ def main() -> None:
     ap.add_argument("--gphh", default=None, help="CSV from scripts/run_gphh.py eval_summary (optional)")
     ap.add_argument("--ppo", default=None, help="CSV from scripts/train_ppo.py ppo_eval_summary (optional)")
     ap.add_argument("--bks", default="data/bks/bks_psplib.json", help="BKS json from scripts/extract_bks.py")
+    ap.add_argument(
+        "--params",
+        default=None,
+        help="instances.csv from scripts/instance_stats.py; enables the "
+        "per-regime summary (suite x RF level x RS quartile x method)",
+    )
     ap.add_argument("--out-dir", required=True)
     args = ap.parse_args()
 
@@ -160,6 +183,83 @@ def main() -> None:
     print(f"instances: {len(detail)}  rule cols: {len(rule_cols)}  below-BKS alerts: {alerts}")
     print(f"wrote {Path(args.out_dir) / 'merged_detail.csv'}")
     print(f"wrote {Path(args.out_dir) / 'summary_by_suite.csv'}")
+
+    # Per-regime summary: RF snapped to the PSPLIB nominal levels, RS bucketed
+    # into within-suite quartiles (RS scales shift with n, so absolute buckets
+    # would compare different regimes across suites).  T1 = tightest.
+    if args.params:
+        rf_levels = (0.25, 0.5, 0.75, 1.0)
+        params = {
+            Path(r["file"]).as_posix(): (to_float(r, "RF"), to_float(r, "RS"))
+            for r in read_csv(Path(args.params))
+        }
+        quartile_edges: dict[str, tuple[float, float, float]] = {}
+        for suite in {d["suite"] for d in detail}:
+            rs = sorted(
+                params[d["file"]][1]
+                for d in detail
+                if d["suite"] == suite
+                and d["file"] in params
+                and params[d["file"]][1] is not None
+            )
+            if len(rs) >= 4:
+                quartile_edges[suite] = tuple(np.percentile(rs, [25, 50, 75]))
+
+        def regime_of(d: dict) -> tuple[str, str] | None:
+            pair = params.get(d["file"])
+            if pair is None:
+                return None
+            rf, rs = pair
+            if rf is None or rs is None:
+                return None
+            level = min(rf_levels, key=lambda lv: abs(lv - rf))
+            if abs(level - rf) > 0.13:
+                rf_label = f"RF~{rf:.2f}"
+            else:
+                rf_label = f"RF={level}"
+            edges = quartile_edges.get(d["suite"])
+            if edges is None:
+                rs_label = "RS-NA"
+            elif rs <= edges[0]:
+                rs_label = "T1-tight"
+            elif rs <= edges[1]:
+                rs_label = "T2"
+            elif rs <= edges[2]:
+                rs_label = "T3"
+            else:
+                rs_label = "T4-loose"
+            return rf_label, rs_label
+
+        regime_methods: dict[tuple, list[int]] = {}
+        for d in detail:
+            regime = regime_of(d)
+            if regime is None:
+                continue
+            for m in METHOD_ORDER:
+                mk = d.get(m)
+                if mk is None:
+                    continue
+                regime_methods.setdefault((d["suite"], *regime, m), []).append(
+                    {"mk": mk, "bks": d.get("bks")}
+                )
+        with open(Path(args.out_dir) / "summary_by_regime.csv", "w", newline="") as fh:
+            w = csv.DictWriter(
+                fh, fieldnames=["suite", "rf_level", "rs_regime", "method", "n",
+                                "mean_makespan", "mean_gap_pct", "n_at_bks"]
+            )
+            w.writeheader()
+            for (suite, rf_label, rs_label, method), rows in sorted(regime_methods.items()):
+                mks = [r["mk"] for r in rows]
+                has_bks = [r for r in rows if r["bks"] is not None]
+                gaps = [100.0 * (r["mk"] - r["bks"]) / r["bks"] for r in has_bks]
+                w.writerow({
+                    "suite": suite, "rf_level": rf_label, "rs_regime": rs_label,
+                    "method": method, "n": len(mks),
+                    "mean_makespan": round(sum(mks) / len(mks), 2),
+                    "mean_gap_pct": round(sum(gaps) / len(gaps), 2) if gaps else "",
+                    "n_at_bks": sum(1 for r in has_bks if r["mk"] <= r["bks"]),
+                })
+        print(f"wrote {Path(args.out_dir) / 'summary_by_regime.csv'}")
 
 
 if __name__ == "__main__":
