@@ -12,16 +12,18 @@
 | 套件 | 数量 | 格式 | 位置 | 角色 |
 |---|---|---|---|---|
 | PSPLIB j30–j120 | 2040 | `.sm` | `data/psplib/` | **test（主测试集）**，BKS 已知 → 精确 gap；训练全程不可见 |
-| RG30（Set 1–5） | 1800 | `.rcp` | `data/oras/RCPSP/RG30/` | **唯一训练池**（分层留 10% 作训练期验证） |
+| 生成池 psp_grid_bal | 1216 | `.rcp` | `data/generated/psp_grid_bal/` | **训练池**（PSPLIB 名义因子网格上的新实例；336 格 × 按 n=30/60/90/120 配平 8/4/2/1，`scripts/generate_pool.py` 生成，train 1148 + val 68） |
+| RG30（Set 1–5） | 1800 | `.rcp` | `data/oras/RCPSP/RG30/` | 旧训练池 → **ablation 对照**（协议存 `splits_rg30.json`） |
 | RG300 | 480 | `.rcp` | `data/oras/RCPSP/RG300/` | 可选泛化参考（跨规模 302 活动；非主 test） |
 | Patterson | 110 | `.rcp` | `data/oras/RCPSP/Patterson/` | 可选补充参考（非主 test） |
-| BKS | — | xlsx | `data/bks/RCPLIB (Parameters and BKS).xlsx` | 最优值来源（合成 → json） |
+| BKS | — | xlsx | `data/bks/RCPLIB (Parameters and BKS).xlsx` | 最优值来源（合成 → json）+ PSPLIB 名义因子设计（`All` sheet → `scripts/psplib_design.py`） |
 
 固定约定：
 
-- **`splits.json` 是唯一切分清单**（seed 20260909，`scripts/make_splits.py` 生成）：`rg30_train`(1620) /
-  `rg30_validation`(180) / `evaluation.{psplib_j30,j60,j90,j120,rg300,patterson}`。所有入口只读它取数，
-  禁止自行扫描目录当切分。
+- **`splits.json` 是唯一切分清单**（2026-09-10 起 = 生成池协议）：`rg30_train`(1148) /
+  `rg30_validation`(68) / `evaluation.{psplib_j30,j60,j90,j120,rg300,patterson}`。所有入口只读它取数，
+  禁止自行扫描目录当切分。旧 RG30-only 协议（1620/180，seed 20260909，`scripts/make_splits.py`）
+  保留在 `splits_rg30.json`。
 - **解析唯一入口**：`src/data/parsers.py`（.sm/.rcp → RCPSPInstance）→ `src/data/adapter.py`：
   `load_core_instance(path, name=None)`（→ core `Instance`）与 `to_core_instance`。
 - 实例唯一标识 = **相对路径去扩展名**（`instance_id`，RG30 跨 Set 有同名 stem，不可只用文件名）。
@@ -33,13 +35,13 @@
 ## 2. 端到端执行流程
 
 ```
- data/ (4430)  ──scripts/make_splits.py──▶ splits.json
+ data/  ──scripts/generate_pool.py──▶ data/generated/psp_grid_bal ──▶ splits.json
       │
       ├─ scripts/baselines.py ───────────────▶ rules CSV（25 列 makespan：serial/parallel × 11 规则 + WCS）
       ├─ scripts/run_ga.py ──────────────────▶ ga CSV（ga_makespan，默认 50×200）
       ├─ scripts/run_gphh.py ────────────────▶ best_rule.txt + eval_summary.csv（训练只读 rg30_train）
       ├─ scripts/train_ppo.py ───────────────▶ outputs/experiments/ppo/<run>/ppo_eval_summary.csv
-      │     （训练=rg30_train；验证=rg30_validation 按 serial_LST gap 择优 checkpoint；
+      │     （训练=rg30_train 生成池；验证=rg30_validation 按 serial_LST gap 择优 checkpoint；
       │       final_model.zip = 训练结束恢复 best 验证权重后的落盘，即 best model）
       │        评估对象：主 test=PSPLIB 各规模；rg300/patterson 为可选泛化/补充参考
       │        shell：train_a800.sh / train_cpu.sh（训练+评估）、eval_cpu.sh（仅评估已有模型）
@@ -56,7 +58,8 @@
 
 | 入口 | 取数 | 关键参数 | 产物 |
 |---|---|---|---|
-| `python -m scripts.make_splits` | data/ 扫描 | `--seed --val-fraction --output` | `splits.json` |
+| `python -m scripts.make_splits` | data/ 扫描 | `--seed --val-fraction --output` | RG30-only 协议（ablation 用，写 `splits_rg30.json`） |
+| `python -m scripts.generate_pool` | PSPLIB + RCPLIB xlsx | `--mode/--replicates/--validation-fraction/--widen/--workers` | 生成池 `.rcp` + manifest（当前 `splits.json` 的来源） |
 | `python -m scripts.baselines` | `--data-root/--suites` | `--max-instances 0`=全量、`--instance-workers` | `makespan_summary.csv` |
 | `python -m scripts.run_ga` | 同 baselines | `--population 50 --generations 200 --seed` | `ga.csv` |
 | `python -m scripts.run_gphh` | `--splits`(训练) + eval-suites | `--train-instances/--population/--generations/--eval-workers` | `best_rule.txt`/`eval_summary.csv` |

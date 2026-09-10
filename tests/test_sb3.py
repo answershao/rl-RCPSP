@@ -303,9 +303,13 @@ class Sb3Test(unittest.TestCase):
             expected_action, _ = model.predict(observation, deterministic=True)
             np.testing.assert_array_equal(restored_action, expected_action)
 
-        # Evaluate on two RG30 training instances through the protocol loader.
+        # Evaluate on two training instances through the protocol loader.  The
+        # generated pool is size-stratified (generated/.../n30|n60|n90|n120/),
+        # and this test's model is built on TEST_INSTANCE's small envelope, so
+        # pick n30 entries that fit it.
         protocol = read_protocol(Path("splits.json"))
-        paths = protocol["train"][:2]
+        paths = [p for p in protocol["train"] if "/n30/" in p][:2]
+        self.assertEqual(len(paths), 2)
         loader = loader_for(Path("data"))
         name_fn = instance_id
         reference_env = SimpleNamespace(

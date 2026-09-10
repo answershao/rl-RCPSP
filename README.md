@@ -38,14 +38,14 @@ scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一�
                  aggregate_results visualize_instance
                  instance_stats（套件参数/覆盖度诊断）· generate_pool（生成训练池）
 tests/           15 个 pytest 文件（61 用例）
-splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/make_splits.py 重新生成）
+splits.json      唯一切分协议（生成池 psp_grid_bal；旧 RG30 协议在 splits_rg30.json）
 ```
 
 ## 复现入口速查
 
 | 步骤 | 命令 | 产物 |
 |---|---|---|
-| （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output splits.json` | `splits.json`（当前版本逐字节一致） |
+| （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output splits_rg30.json` | RG30-only 协议（ablation 用） |
 | 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/CP + 与训练池的特征级交叠） |
 | 生成候选训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json` | 生成 `.rcp` + `read_protocol` 兼容 manifest（可直接喂 `--splits`）；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
@@ -78,13 +78,18 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
 
 ## 关键口径（与 docs/EXECUTION_FLOW.md §1 同源）
 
-- `splits.json` 是**唯一切分清单**：训练=rg30_train(1620)、训练期验证=rg30_validation(180)、
+- `splits.json` 是**唯一切分清单**（2026-09-10 起为生成池协议）：训练=rg30_train
+  （1148，PSPLIB 因子网格生成实例，按 n=30/60/90/120 以 8/4/2/1 配平）、
+  训练期验证=rg30_validation（68，按规模 20% 格子抽取）、
   test=PSPLIB（主测试集，训练期不可见）；rg300/patterson 为可选泛化/补充参考，不进主对比表。
+  旧 RG30-only 协议保留在 `splits_rg30.json`（seed 20260909，`scripts/make_splits.py` 可重建），
+  供"RG30 训练 vs 生成池训练"ablation 对照。
 - **参数覆盖度是可测量的，不是口号**：PSPLIB j30-j120 是 4 RF × (4|5) RS × 3 NC 的因子设计，
-  而 RG30 训练池在参数空间里是一个点（RF 恒 0.75、RS∈[0.003,0.046]、n 恒 30），
+  旧 RG30 训练池在参数空间里是一个点（RF 恒 0.75、RS∈[0.003,0.046]、n 恒 30），
   j30-j120 的 RF×RS 联合覆盖只有 0–15%。用 `scripts/instance_stats` 量化、
-  `scripts/generate_pool` 补齐（`data/generated/psp_grid/` 是现成候选池，
-  RF×RS 联合覆盖升到 93–100%）。`splits.json` 未动，是否切换训练池是协议决策。
+  `scripts/generate_pool` 在同一网格上生成新实例补齐——现役训练池
+  `data/generated/psp_grid_bal` 的 RF×RS 联合覆盖升到 93–100%，
+  demand/capacity 特征交叠从 ~0.4 升到 0.84–0.93。
 - 解析唯一入口 `src.data.adapter.load_core_instance`；实例唯一标识 = 数据根相对路径去扩展名。
 - 模型全局 cap：302 活动 / 4 资源 / `MAX_SUCCESSORS=96` + `MAX_PREDECESSORS=96`
   （全语料实测上界 89 / 91，共用 96 余量；j30→RG300 零样本单模型）。
@@ -94,7 +99,7 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
   因此没有丢图结构信息。critic 图池化同理用 `[节点均值 | 节点最大 | global]`，不含随节点数
   增长的求和项。
 - **训练图与评估图可以不同**：`train_cpu.sh`/`train_a800.sh` 默认带 `--train-max-activities auto`
-  （训练池 RG30 只有 32 活动），训练在 32 图上跑、保存前用 `src.training.ppo.widen_policy`
+  （训练图取训练池最大活动数，当前池 → 122），训练在小图上跑、保存前用 `src.training.ppo.widen_policy`
   把权重迁到 302 图。RCPSP 策略的 30 个可训练参数形状与活动数无关，同一实例下两个图的前向
   数值逐位相同（logits / value 差 0.0），因此只省算力、不改学到的策略。
   ⚠️ **函数等价 ≠ 训练等价**：动作空间是 `Discrete(max_activities)`，`torch.multinomial`
