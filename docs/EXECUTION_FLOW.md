@@ -56,6 +56,8 @@ S1 generate_pool ----+-----------------------+
 - S2 生成的 `instances.csv` 是 S6 `--params` 的唯一来源；没有它仍可汇总，但不会生成 regime 表。
 - S4 与 S5 可并行，但 S5 不能绕过 S3。
 - `run_test_baselines.sh` 只封装 S2 + S4 + S6，不生成训练池、不生成 S3 参照规则，也不训练 PPO。
+- S5 的默认关键路径 shaping 只改变 makespan 惩罚的时间分配；其 episode 累计目标仍是
+  makespan 的单调变换，`CRITICAL_PATH_SHAPING=0` 可用于无 shaping 对照实验。
 
 ## 3. 代码边界
 

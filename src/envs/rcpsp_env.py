@@ -40,6 +40,7 @@ class _ScheduleState:
     remaining_predecessors: np.ndarray
     eligible_mask: np.ndarray
     current_time: int = 0
+    critical_lower_bound: int = 0
     resource_work: int = 0
     invalid_action_penalty: float = 0.0
     terminated: bool = False
@@ -61,6 +62,7 @@ class _ScheduleState:
         self.remaining_predecessors[:] = predecessor_counts
         self.eligible_mask[:] = self.remaining_predecessors == 0
         self.current_time = 0
+        self.critical_lower_bound = 0
         self.resource_work = 0
         self.invalid_action_penalty = 0.0
         self.terminated = False
@@ -76,8 +78,16 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, instance: Instance | str | Path):
+    def __init__(
+        self,
+        instance: Instance | str | Path,
+        *,
+        reward_shaping_coef: float = 0.0,
+    ):
         super().__init__()
+        if reward_shaping_coef < 0.0:
+            raise ValueError("reward_shaping_coef must be non-negative")
+        self.reward_shaping_coef = float(reward_shaping_coef)
         self.instance = (
             load_core_instance(instance) if isinstance(instance, (str, Path)) else instance
         )
@@ -215,6 +225,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         chosen = self.activity_ids[chosen_index]
 
         old_time = state.current_time
+        old_critical_lower_bound = state.critical_lower_bound
         start, finish = serial_sgs_insert(
             self.instance, chosen, state.starts, state.finishes, state.usage,
             capacities_array=self._capacities,
@@ -232,8 +243,21 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             if state.remaining_predecessors[successor_index] == 0:
                 state.eligible_mask[successor_index] = True
         state.current_time = max(state.current_time, finish)
+        remaining_path_duration = max(
+            0,
+            int(self._downstream_durations[chosen_index])
+            - int(self._durations[chosen_index]),
+        )
+        state.critical_lower_bound = max(
+            old_critical_lower_bound,
+            state.current_time,
+            finish + remaining_path_duration,
+        )
         makespan_penalty = -float(state.current_time - old_time) / max(self.horizon, 1)
-        reward = makespan_penalty
+        critical_path_penalty = -float(
+            state.critical_lower_bound - old_critical_lower_bound
+        ) / max(self.horizon, 1)
+        reward = makespan_penalty + self.reward_shaping_coef * critical_path_penalty
         state.terminated = len(state.starts) == self.activity_count
 
         observation = self._observation()
@@ -255,9 +279,15 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
                     "resource_utilization": self._resource_utilization(state.current_time),
                     "activity_count": self.activity_count,
                     "episode_makespan_penalty": -state.current_time / max(self.horizon, 1),
+                    "episode_critical_path_penalty": (
+                        -state.critical_lower_bound / max(self.horizon, 1)
+                    ),
                     "episode_invalid_action_penalty": state.invalid_action_penalty,
                     "episode_reward": (
                         -state.current_time / max(self.horizon, 1)
+                        - self.reward_shaping_coef
+                        * state.critical_lower_bound
+                        / max(self.horizon, 1)
                         + state.invalid_action_penalty
                     ),
                 }

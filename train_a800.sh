@@ -27,11 +27,16 @@ mkdir -p "${LOG_DIR}"
 TRAIN_LOG_FILE="${LOG_DIR}/a800_$(date +%Y%m%d_%H%M%S).log"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-10}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-12}"
 GAMMA="${GAMMA:-0.999}"
 GAE_LAMBDA="${GAE_LAMBDA:-0.98}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
-N_EPOCHS="${N_EPOCHS:-3}"
+N_EPOCHS="${N_EPOCHS:-5}"
 LEARNING_RATE="${LEARNING_RATE:-2e-4}"
+ENT_COEF="${ENT_COEF:-0.005}"
+VF_COEF="${VF_COEF:-0.5}"
+TARGET_KL="${TARGET_KL:-0.02}"
+CRITICAL_PATH_SHAPING="${CRITICAL_PATH_SHAPING:-0.5}"
 N_ENVS="${N_ENVS:-48}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6400000}"
 EVAL_ALL="${EVAL_ALL:-1}"
@@ -54,6 +59,10 @@ nohup python -m scripts.train_ppo \
     --batch-size "${BATCH_SIZE}" \
     --n-epochs "${N_EPOCHS}" \
     --learning-rate "${LEARNING_RATE}" \
+    --ent-coef "${ENT_COEF}" \
+    --vf-coef "${VF_COEF}" \
+    --critical-path-shaping "${CRITICAL_PATH_SHAPING}" \
+    --target-kl "${TARGET_KL}" \
     --gamma "${GAMMA}" \
     --gae-lambda "${GAE_LAMBDA}" \
     --gin-layers 2 \
@@ -66,6 +75,7 @@ nohup python -m scripts.train_ppo \
     --start-method spawn \
     --torch-threads 1 \
     --torch-interop-threads 1 \
+    --early-stop-patience "${EARLY_STOP_PATIENCE}" \
     --validation-interval "${VALIDATION_INTERVAL}" \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --seed 17 \

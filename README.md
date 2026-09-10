@@ -53,7 +53,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |
-| PPO 训练 | `bash train_a800.sh`（GPU，默认训后评测）／`bash train_cpu.sh`（CPU，`EVAL_ALL=1` 时含评估） | `final_model.zip` + `ppo_eval_summary.csv` |
+| PPO 训练 | `bash train_a800.sh`（GPU）／`bash train_cpu.sh`（CPU；默认训后评测） | `final_model.zip` + `ppo_eval_summary.csv` |
 | PPO 训练吞吐扫描 | `python -m scripts.bench_ppo --caps 122 --threads 8 16 20 --batch-sizes 512 1024 4096` | 终端表格 / 可选 `--output-csv`（rollout·update·total fps） |
 | PPO 评估已有模型 | `bash eval_cpu.sh`（MODEL_DIR 指向 run 目录，评估 PSPLIB j30-j120） | 同上目录追加 `ppo_eval_summary.csv` |
 | 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
@@ -111,4 +111,6 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 - generated 训练/验证和 PSPLIB 测试统一使用 122 节点 cap，不执行模型扩宽。
 - 训练耗时主要在 PPO 的 update（约 86%），环境采样不是瓶颈；用 `scripts/bench_ppo.py` 在目标
   机器上定 batch/线程，勿直接套用其他机器的结论。
+- PPO 默认使用 `critical-path-shaping=0.5`：根据已排活动的关键路径下界重新分配
+  makespan 的信用，episode 总目标仍等价于最小化 makespan；设为 `0` 可关闭。
 - BKS：`data/bks/bks_psplib.json`（由 RCPLIB xlsx 合成，勿单独引用平凡兜底 UB 列）。

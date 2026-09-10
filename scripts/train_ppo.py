@@ -62,14 +62,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-envs", type=int, default=16)
     parser.add_argument("--n-steps", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=4096)
-    parser.add_argument("--n-epochs", type=int, default=3)
+    parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--gamma", type=float, default=0.999)
     parser.add_argument("--gae-lambda", type=float, default=0.98)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
-    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--ent-coef", type=float, default=0.005)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument(
-        "--target-kl", type=float, default=0.0,
+        "--critical-path-shaping", type=float, default=0.5,
+        help="coefficient for potential-based critical-path reward shaping; 0 disables it",
+    )
+    parser.add_argument(
+        "--target-kl", type=float, default=0.02,
         help="stop PPO epochs early above this approximate KL; 0 disables it",
     )
     parser.add_argument("--gin-layers", type=int, default=2)
@@ -105,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         "--max-resources", type=int, default=None,
         help="global resource cap; default = max across all participating splits",
     )
-    parser.add_argument("--early-stop-patience", type=int, default=0,
+    parser.add_argument("--early-stop-patience", type=int, default=12,
                         help="stop after N validation evaluations without improvement; 0 disables it")
     parser.add_argument("--validation-interval", type=int, default=10,
                         help="evaluate the validation split every N rollouts")
@@ -307,6 +311,7 @@ def main() -> None:
         or args.learning_rate <= 0
         or args.ent_coef < 0
         or args.vf_coef < 0
+        or args.critical_path_shaping < 0
         or args.target_kl < 0
         or args.gin_layers < 1
         or args.torch_threads < 1
@@ -391,6 +396,7 @@ def main() -> None:
         f"device={args.device}; envs={args.n_envs}; rollout={rollout_size}; "
         f"batch={args.batch_size}; epochs={args.n_epochs}; lr={args.learning_rate}; "
         f"ent_coef={args.ent_coef}; gamma={args.gamma}; gae_lambda={args.gae_lambda}; "
+        f"critical_path_shaping={args.critical_path_shaping}; "
         f"objective=makespan_only; caps=({max_activities},{max_resources}); "
         f"max_successors={MAX_SUCCESSORS}; "
         f"obs_dim={observation_size(max_activities, max_resources)}"
@@ -421,6 +427,7 @@ def main() -> None:
             max_resources=max_resources,
             instance_indices=worker_indices,
             catalog_size=len(train_rels),
+            reward_shaping_coef=args.critical_path_shaping,
             loader=loader,
         )
         for worker_paths, worker_indices in worker_catalogs

@@ -53,6 +53,7 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
                  max_activities: int | None = None, max_resources: int | None = None,
                  instance_indices: list[int] | None = None,
                  catalog_size: int | None = None,
+                 reward_shaping_coef: float = 0.0,
                  loader: Callable[[Path], Instance] = load_core_instance):
         super().__init__()
         if not instances:
@@ -75,7 +76,10 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
         self.observation_space = spaces.Box(0.0, 1.0, (feature_size,), dtype=np.float32)
         # Reuse environment objects across episodes; reset only clears mutable
         # scheduling state and avoids repeated allocation of large buffers.
-        self._envs = [RCPSPEnv(instance) for instance in self.instances]
+        self._envs = [
+            RCPSPEnv(instance, reward_shaping_coef=reward_shaping_coef)
+            for instance in self.instances
+        ]
         self._env: RCPSPEnv | None = None
         self._flat_buffers: dict[int, np.ndarray] = {}
         self._capacity_scales = {

@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "RCPSP: Visualize one instance (j30)",
+            "name": "RCPSP: Visualize one instance (test j30)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/visualize_instance.py",
@@ -13,7 +13,7 @@
             ]
         },
         {
-            "name": "RCPSP: Baselines priority rules (rg30 full)",
+            "name": "RCPSP: Baselines priority rules (train pool full)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.baselines",
@@ -30,17 +30,17 @@
                 "--data-root",
                 "data",
                 "--suites",
-                "rg30",
+                "psp_grid",
                 "--seed",
                 "17",
                 "--instance-workers",
                 "8",
                 "--output-csv",
-                "outputs/rules_rg30/makespan_summary.csv"
+                "outputs/rules_psp_grid/makespan_summary.csv"
             ]
         },
         {
-            "name": "RCPSP: Baselines priority rules (j30 5-instance smoke)",
+            "name": "RCPSP: Baselines priority rules (test j30 smoke)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.baselines",
@@ -69,7 +69,7 @@
             ]
         },
         {
-            "name": "RCPSP: GA smoke (psplib_j30, 5 instances)",
+            "name": "RCPSP: GA smoke (test j30, 5 instances)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.run_ga",
@@ -102,7 +102,7 @@
             ]
         },
         {
-            "name": "RCPSP: GPHH smoke (RG30 8 + eval j30 2)",
+            "name": "RCPSP: GPHH smoke (train 8 + test j30 2)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.run_gphh",
@@ -139,7 +139,7 @@
             ]
         },
         {
-            "name": "RCPSP: Debug PPO-GIN environment step (CPU)",
+            "name": "RCPSP: Debug PPO-GIN train/test step (CPU)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",
@@ -162,7 +162,7 @@
                 "--splits",
                 "splits.json",
                 "--ref-rules",
-                "outputs/rules_rg30/makespan_summary.csv",
+                "outputs/rules_psp_grid/makespan_summary.csv",
                 "--n-envs",
                 "1",
                 "--total-timesteps",
@@ -198,7 +198,7 @@
             ]
         },
         {
-            "name": "RCPSP: Train PPO-GIN on RG30 protocol (A800)",
+            "name": "RCPSP: Train PPO-GIN on train/test protocol (A800)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",
@@ -218,21 +218,31 @@
                 "--splits",
                 "splits.json",
                 "--ref-rules",
-                "outputs/rules_rg30/makespan_summary.csv",
+                "outputs/rules_psp_grid/makespan_summary.csv",
                 "--max-activities",
-                "302",
+                "122",
                 "--max-resources",
                 "4",
                 "--n-envs",
-                "96",
+                "48",
                 "--total-timesteps",
                 "6400000",
                 "--batch-size",
-                "8192",
+                "4096",
                 "--n-steps",
                 "256",
                 "--n-epochs",
-                "2",
+                "5",
+                "--learning-rate",
+                "2e-4",
+                "--ent-coef",
+                "0.005",
+                "--vf-coef",
+                "0.5",
+                "--critical-path-shaping",
+                "0.5",
+                "--target-kl",
+                "0.02",
                 "--gin-layers",
                 "2",
                 "--device",
@@ -252,6 +262,10 @@
                 "1",
                 "--torch-interop-threads",
                 "1",
+                "--early-stop-patience",
+                "12",
+                "--validation-interval",
+                "10",
                 "--seed",
                 "17",
                 "--eval-all",
@@ -260,7 +274,7 @@
             ]
         },
         {
-            "name": "RCPSP: Evaluate PPO-GIN on psplib_j30 (CPU)",
+            "name": "RCPSP: Evaluate PPO-GIN on test j30 (CPU)",
             "type": "debugpy",
             "request": "launch",
             "module": "scripts.train_ppo",

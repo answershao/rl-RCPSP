@@ -43,21 +43,22 @@ N_STEPS="${N_STEPS:-384}"
 # 32 embedding dims in fp32), so smaller values measured markedly faster.  Run
 # `python -m scripts.bench_ppo --help` on the target host to confirm the optimum.
 BATCH_SIZE="${BATCH_SIZE:-4096}"
-N_EPOCHS="${N_EPOCHS:-3}"
+N_EPOCHS="${N_EPOCHS:-5}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
-LEARNING_RATE="${LEARNING_RATE:-5e-4}"
-ENT_COEF="${ENT_COEF:-0.001}"
-VF_COEF="${VF_COEF:-0.1}"
-TARGET_KL="${TARGET_KL:-0.01}"
+LEARNING_RATE="${LEARNING_RATE:-2e-4}"
+ENT_COEF="${ENT_COEF:-0.005}"
+VF_COEF="${VF_COEF:-0.5}"
+TARGET_KL="${TARGET_KL:-0.02}"
 GAMMA="${GAMMA:-0.999}"
 GAE_LAMBDA="${GAE_LAMBDA:-0.98}"
-EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-5}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-12}"
 VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-25}"
 VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
+CRITICAL_PATH_SHAPING="${CRITICAL_PATH_SHAPING:-0.5}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SEED="${SEED:-17}"
-EVAL_ALL="${EVAL_ALL:-0}"
+EVAL_ALL="${EVAL_ALL:-1}"
 EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
 EVAL_ARGS=()
@@ -79,6 +80,7 @@ nohup python -m scripts.train_ppo \
     --learning-rate "${LEARNING_RATE}" \
     --ent-coef "${ENT_COEF}" \
     --vf-coef "${VF_COEF}" \
+    --critical-path-shaping "${CRITICAL_PATH_SHAPING}" \
     --target-kl "${TARGET_KL}" \
     --gamma "${GAMMA}" \
     --gae-lambda "${GAE_LAMBDA}" \

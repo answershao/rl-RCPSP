@@ -30,6 +30,7 @@ def make_multi_env(
     max_resources: int | None = None,
     instance_indices: list[int] | None = None,
     catalog_size: int | None = None,
+    reward_shaping_coef: float = 0.0,
     loader: Callable | None = None,
 ) -> Monitor:
     """Create a monitored multi-instance environment with optional padding."""
@@ -39,6 +40,7 @@ def make_multi_env(
         max_resources=max_resources,
         instance_indices=instance_indices,
         catalog_size=catalog_size,
+        reward_shaping_coef=reward_shaping_coef,
     )
     if loader is not None:
         kwargs["loader"] = loader

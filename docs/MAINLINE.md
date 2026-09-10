@@ -188,8 +188,10 @@ bash train_a800.sh
 | 常见失败 | ① 缺 S3 → `FileNotFoundError` 或 "does not cover N validation instances"；② `RUN_DIR` 已存在 → 脚本直接 `exit 2`（设 `RUN_DIR=` 新目录或 `ALLOW_OVERWRITE_BASELINE=1`） |
 
 常用环境变量：`RUN_DIR`（默认 `outputs/experiments/ppo/cpu_runs/cpu_<时间戳>`）、`REF_RULES`、
-`TOTAL_TIMESTEPS`（默认 1e7）、`SEED`（默认 17）、`EVAL_ALL=1`（训练后顺带评全部 evaluation 组）、
-`N_ENVS/N_STEPS/BATCH_SIZE/N_EPOCHS/TORCH_THREADS`。
+`TOTAL_TIMESTEPS`（默认 1e7）、`SEED`（默认 17）、`EVAL_ALL=1`（默认训练后评全部 evaluation 组）、
+`N_ENVS/N_STEPS/BATCH_SIZE/N_EPOCHS/TORCH_THREADS`，以及 `CRITICAL_PATH_SHAPING`（默认 0.5，
+设为 0 关闭）。CPU 与 A800 入口默认使用同一套 PPO 优化参数：`lr=2e-4`、`n_epochs=5`、
+`ent_coef=0.005`、`vf_coef=0.5`，并在 validation 无改善一段时间后早停。
 
 关键口径：generated 训练/验证和 PSPLIB 测试统一使用 122 节点 cap，不执行模型扩宽。
 

@@ -101,6 +101,27 @@ class RcpspEnvTest(unittest.TestCase):
         self.assertAlmostEqual(terminal_info["episode_makespan_penalty"], -schedule.makespan / env.horizon)
         self.assertAlmostEqual(terminal_info["episode_reward"], total_reward)
 
+    def test_critical_path_shaping_preserves_makespan_objective(self) -> None:
+        shaping = 0.5
+        env = RCPSPEnv(TEST_INSTANCE, reward_shaping_coef=shaping)
+        observation, _ = env.reset(seed=13)
+        total_reward = 0.0
+        terminated = False
+        rng = np.random.default_rng(13)
+        while not terminated:
+            eligible = np.flatnonzero(observation["eligible_mask"])
+            observation, reward, terminated, _, terminal_info = env.step(
+                int(rng.choice(eligible))
+            )
+            total_reward += reward
+
+        expected = -(1.0 + shaping) * env.schedule.makespan / env.horizon
+        self.assertAlmostEqual(total_reward, expected)
+        self.assertAlmostEqual(terminal_info["episode_makespan_penalty"],
+                               -env.schedule.makespan / env.horizon)
+        self.assertAlmostEqual(terminal_info["episode_critical_path_penalty"],
+                               -env.schedule.makespan / env.horizon)
+
     def test_incremental_decoder_matches_batch_ssgs(self) -> None:
         instance = load_core_instance(TEST_INSTANCE)
         env = RCPSPEnv(instance)
