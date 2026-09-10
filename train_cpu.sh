@@ -34,7 +34,11 @@ fi
 # host).  These can be overridden for benchmarking, for example N_ENVS=40.
 N_ENVS="${N_ENVS:-32}"
 N_STEPS="${N_STEPS:-384}"
-BATCH_SIZE="${BATCH_SIZE:-4096}"
+# Minibatch size drives update time, which dominates a PPO iteration.  Large
+# minibatches blow the activation working set out of cache (batch * 302 nodes *
+# 32 embedding dims in fp32), so smaller values measured markedly faster.  Run
+# `python -m scripts.bench_ppo --help` on the target host to confirm the optimum.
+BATCH_SIZE="${BATCH_SIZE:-1024}"
 N_EPOCHS="${N_EPOCHS:-3}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
@@ -50,6 +54,10 @@ VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SEED="${SEED:-17}"
 EVAL_ALL="${EVAL_ALL:-0}"
+# Train on the smallest padded graph that covers the training pool (32 for RG30)
+# and widen the policy to the global cap before evaluation. Set to the global
+# cap, or pass an explicit integer, to disable the widening path.
+TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
 
 EVAL_ARGS=()
 if [[ "${EVAL_ALL}" == "1" ]]; then
@@ -62,6 +70,7 @@ nohup python -m scripts.train_ppo \
     --ref-rules "${REF_RULES}" \
     --max-activities 302 \
     --max-resources 4 \
+    --train-max-activities "${TRAIN_MAX_ACTIVITIES}" \
     --n-envs "${N_ENVS}" \
     --total-timesteps "${TOTAL_TIMESTEPS}" \
     --n-steps "${N_STEPS}" \

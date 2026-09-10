@@ -31,6 +31,10 @@ LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 N_ENVS="${N_ENVS:-48}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6400000}"
 EVAL_ALL="${EVAL_ALL:-1}"
+# Train on the smallest padded graph covering the training pool (32 for RG30)
+# and widen the policy to the global cap before evaluation; the GIN/actor run on
+# every padded node, so this removes the wasted compute on zero nodes.
+TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
 
 EVAL_ARGS=()
 if [[ "${EVAL_ALL}" == "1" ]]; then
@@ -43,6 +47,7 @@ nohup python -m scripts.train_ppo \
     --ref-rules "${REF_RULES}" \
     --max-activities 302 \
     --max-resources 4 \
+    --train-max-activities "${TRAIN_MAX_ACTIVITIES}" \
     --n-envs "${N_ENVS}" \
     --total-timesteps "${TOTAL_TIMESTEPS}" \
     --n-steps 256 \

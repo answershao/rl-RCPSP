@@ -33,8 +33,9 @@ src/
   visualization/ aon.py · gantt.py
 scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一事实源）
                  make_splits baselines run_ga run_gphh train_ppo search_ppo
-                 compare_ppo_results extract_bks aggregate_results visualize_instance
-tests/           12 个 pytest 文件（35 用例）
+                 bench_ppo（训练吞吐扫描）compare_ppo_results extract_bks
+                 aggregate_results visualize_instance
+tests/           13 个 pytest 文件（37 用例）
 splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/make_splits.py 重新生成）
 ```
 
@@ -47,6 +48,7 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |
 | PPO 训练 | `bash train_a800.sh`（GPU，含 --eval-all）／`bash train_cpu.sh`（CPU，`EVAL_ALL=1` 时含评估） | `final_model.zip` + `ppo_eval_summary.csv` |
+| PPO 训练吞吐扫描 | `python -m scripts.bench_ppo --caps 32 302 --threads 8 16 20 --batch-sizes 512 1024 4096` | 终端表格 / 可选 `--output-csv`（rollout·update·total fps） |
 | PPO 评估已有模型 | `bash eval_cpu.sh`（MODEL_DIR 指向 run 目录，评估 splits.json 全部 evaluation 组） | 同上目录追加 `ppo_eval_summary.csv` |
 | 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
 | 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv`（gap vs BKS、below-BKS 告警） |
@@ -76,4 +78,10 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
   test=PSPLIB（主测试集，训练期不可见）；rg300/patterson 为可选泛化/补充参考，不进主对比表。
 - 解析唯一入口 `src.data.adapter.load_core_instance`；实例唯一标识 = 数据根相对路径去扩展名。
 - 模型全局 cap：302 活动 / 4 资源 / MAX_SUCCESSORS=96（j30→RG300 零样本单模型）。
+  **训练图与评估图可以不同**：`train_cpu.sh`/`train_a800.sh` 默认带 `--train-max-activities auto`
+  （训练池 RG30 只有 32 活动），训练在 32 图上跑、保存前用 `src.training.ppo.widen_policy`
+  把权重迁到 302 图。RCPSP 策略的 30 个可训练参数形状与活动数无关，同一实例下两个图的前向
+  数值完全一致，因此这只省算力、不改学习信号。设 `TRAIN_MAX_ACTIVITIES=302` 可关闭。
+- 训练耗时主要在 PPO 的 update（约 86%），环境采样不是瓶颈；用 `scripts/bench_ppo.py` 在目标
+  机器上定 batch/线程，勿直接套用其他机器的结论。
 - BKS：`data/bks/bks_psplib.json`（由 RCPLIB xlsx 合成，勿单独引用平凡兜底 UB 列）。

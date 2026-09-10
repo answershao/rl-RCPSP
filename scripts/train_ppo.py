@@ -14,6 +14,13 @@ graph is sized to a global activity/resource cap (default auto = the maximum
 across every participating split), which lets one model evaluate PSPLIB
 j30-j120 (32-122 activities) and RG300 (302 activities) zero-shot.
 
+``--train-max-activities auto`` shrinks only the *training* graph to the
+train+validation maximum (32 for the RG30 pool).  Every trainable policy
+parameter is size-agnostic, so the policy is widened back to the global cap
+before the model is saved and evaluated (``src.training.ppo.widen_policy``);
+for a fixed instance the small and widened policies produce identical logits.
+This cuts training time by several times without changing the learned function.
+
 Evaluation writes ``ppo_eval_summary.csv`` with columns
 ``suite,file,n_activities,n_resources,ppo_makespan``, consumable by
 ``scripts/aggregate_results.py --ppo`` for the BKS-gap comparison table.
@@ -50,7 +57,7 @@ from src.data.instances import (
     loader_for,
     read_protocol,
 )
-from src.training.ppo import create_ppo, evaluate_paths
+from src.training.ppo import create_ppo, evaluate_paths, widen_policy
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +113,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-resources", type=int, default=None,
         help="global resource cap; default = max across all participating splits",
+    )
+    parser.add_argument(
+        "--train-max-activities", default=None,
+        help="activity cap used for the training rollout; 'auto' = max over the "
+             "train+validation splits (32 for the RG30 pool). Training on a "
+             "smaller padded graph is much cheaper because every trainable policy "
+             "parameter is size-agnostic, and the policy is widened to the global "
+             "cap before evaluation (see src.training.ppo.widen_policy). Default "
+             "None keeps the global cap for training as well.",
     )
     parser.add_argument("--early-stop-patience", type=int, default=0,
                         help="stop after N validation evaluations without improvement; 0 disables it")
@@ -381,6 +397,41 @@ def main() -> None:
         max_activities, max_resources = args.max_activities, args.max_resources
     reference_env = SimpleNamespace(max_activities=max_activities, max_resources=max_resources)
 
+    # Training may run on a smaller padded graph than evaluation. Every trainable
+    # parameter of the RCPSP policy is size-agnostic, so the policy is widened to
+    # the global cap before the model is saved and evaluated.
+    if args.train_max_activities is None:
+        train_max_activities, train_max_resources = max_activities, max_resources
+    else:
+        if args.train_max_activities == "auto":
+            scanned_train_activities, scanned_train_resources = scan_caps(
+                loader, list(train_rels) + list(validation_rels)
+            )
+            train_max_activities = min(scanned_train_activities, max_activities)
+            train_max_resources = min(scanned_train_resources, max_resources)
+        else:
+            try:
+                train_max_activities = int(args.train_max_activities)
+            except ValueError as exc:
+                raise ValueError(
+                    "--train-max-activities must be a positive integer or 'auto'"
+                ) from exc
+            train_max_resources = max_resources
+        if train_max_activities < 1 or train_max_resources < 1:
+            raise ValueError("--train-max-activities must be positive")
+        if train_max_activities > max_activities or train_max_resources > max_resources:
+            raise ValueError(
+                "--train-max-activities cannot exceed the global cap "
+                f"({max_activities} activities, {max_resources} resources)"
+            )
+    widen_policy_graph = (train_max_activities, train_max_resources) != (
+        max_activities,
+        max_resources,
+    )
+    train_reference_env = SimpleNamespace(
+        max_activities=train_max_activities, max_resources=train_max_resources
+    )
+
     reference_rules = load_reference_rules(args.ref_rules, args.ref_rule)
     missing = [rel for rel in validation_rels if instance_id(rel) not in reference_rules]
     if missing:
@@ -394,7 +445,9 @@ def main() -> None:
         f"batch={args.batch_size}; epochs={args.n_epochs}; lr={args.learning_rate}; "
         f"ent_coef={args.ent_coef}; gamma={args.gamma}; gae_lambda={args.gae_lambda}; "
         f"objective=makespan_only; caps=({max_activities},{max_resources}); "
-        f"max_successors={MAX_SUCCESSORS}; obs_dim={observation_size(max_activities, max_resources)}"
+        f"train_caps=({train_max_activities},{train_max_resources}); "
+        f"max_successors={MAX_SUCCESSORS}; "
+        f"obs_dim={observation_size(train_max_activities, train_max_resources)}"
     )
     if args.device.startswith("cuda"):
         runtime += f"; gpu={torch.cuda.get_device_name(torch.device(args.device))}"
@@ -402,11 +455,17 @@ def main() -> None:
 
     train_instances = [loader(rel) for rel in train_rels]
     validation_instances = [loader(rel) for rel in validation_rels]
+    # Training and in-training validation both run on the training graph; the
+    # policy is widened to the global cap only for the final evaluation.
     training_cache = build_static_graph_cache(
-        train_instances, max_activities=max_activities, max_resources=max_resources,
+        train_instances,
+        max_activities=train_max_activities,
+        max_resources=train_max_resources,
     )
     validation_cache = build_static_graph_cache(
-        validation_instances, max_activities=max_activities, max_resources=max_resources,
+        validation_instances,
+        max_activities=train_max_activities,
+        max_resources=train_max_resources,
     )
 
     worker_catalogs = partition_instance_catalog(train_rels, args.n_envs)
@@ -414,8 +473,8 @@ def main() -> None:
         partial(
             make_multi_env,
             worker_paths,
-            max_activities=max_activities,
-            max_resources=max_resources,
+            max_activities=train_max_activities,
+            max_resources=train_max_resources,
             instance_indices=worker_indices,
             catalog_size=len(train_rels),
             loader=loader,
@@ -449,7 +508,7 @@ def main() -> None:
             validate_rule_relative_gap,
             rels=validation_rels,
             seed=args.seed,
-            reference_env=reference_env,
+            reference_env=train_reference_env,
             reference_rules=reference_rules,
             loader=loader,
             name_fn=instance_id,
@@ -471,6 +530,34 @@ def main() -> None:
         model.set_parameters(best_model_path, exact_match=True, device=args.device)
         print(f"restored best validation model: {best_model_path}; "
               f"rule-relative gap={callback.best_validation_gap:+.6f}")
+        if widen_policy_graph:
+            print(
+                f"widening policy graph: ({train_max_activities},{train_max_resources}) "
+                f"-> ({max_activities},{max_resources}); trainable weights are "
+                "size-agnostic, only the static graph cache is rebuilt"
+            )
+            # Only the weights matter here. The graph cache attached to the
+            # widened model is a seed: every evaluation entry point replaces it
+            # via ``extractor.set_static_cache`` for the split it is about to
+            # run, so the (much smaller) validation catalog is enough and
+            # avoids materialising the global-cap cache for the whole training
+            # pool a second time.
+            model = widen_policy(
+                model,
+                instances=validation_instances,
+                max_activities=max_activities,
+                max_resources=max_resources,
+                static_cache=build_static_graph_cache(
+                    validation_instances,
+                    max_activities=max_activities,
+                    max_resources=max_resources,
+                ),
+                device=args.device,
+            )
+            print(
+                f"widened model graph: activities={model.policy.features_extractor.max_activities} "
+                f"resources={model.policy.features_extractor.max_resources}"
+            )
         model.save(str(output_dir / "final_model"))
         if eval_rels:
             evaluate_suites_and_write(
