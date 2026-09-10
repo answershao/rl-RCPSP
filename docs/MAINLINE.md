@@ -1,7 +1,7 @@
 # 主线执行手册（S0–S6）
 
 > 定位：**可复制粘贴的操作手册**。每一步给出命令、输入依赖、产物路径、通过判据与常见失败。
-> 与之分工：**[docs/EXECUTION_FLOW.md](EXECUTION_FLOW.md)** = 协议口径 / 方法定义 / 重构路线图（"为什么这样做"）；
+> 与之分工：**[docs/EXECUTION_FLOW.md](EXECUTION_FLOW.md)** = 协议口径 / 模块边界 / 阶段依赖（"为什么这样做"）；
 > 本文 = 操作顺序（"怎么跑、跑完看什么"）。根 `README.md` = 仓库门面与产物目录规范。
 > 更新日期：2026-09-10（对应当前协议 `splits.json`：生成池 `psp_grid_bal`，seed 20260910）。
 
@@ -66,7 +66,7 @@ S2 协议诊断        S3 训练池参照规则      S4 test 侧基线
 ### S0 —— 环境自检
 
 ```bash
-python -m pytest -q -W error -m 'not slow'  # 期望 64 passed, 1 deselected（≈40s 快测）
+python -m pytest -q -W error -m 'not slow'  # 期望 64 passed, 1 deselected
 python -m pytest -m slow                # 可选：3256 个主协议实例解析回归
 ```
 
@@ -74,7 +74,7 @@ python -m pytest -m slow                # 可选：3256 个主协议实例解析
 |---|---|
 | 输入 | — |
 | 产物 | — |
-| 通过判据 | `65 passed`，且 `-W error` 下无警告级失败 |
+| 通过判据 | 快测 `64 passed, 1 deselected`；全量 `65 passed`，且 `-W error` 下无警告级失败 |
 | 失败时 | 先修测试再往下走；后续所有阶段的产物都不可信 |
 
 ### S1 —— 生成训练池 + 协议
@@ -86,6 +86,7 @@ python -m scripts.generate_pool \
   --validation-per-size 32 \
   --widen \
   --workers 8 \
+  --splits splits.json \
   --output data/generated/psp_grid_bal \
   --manifest data/generated/psp_grid_bal.json
 

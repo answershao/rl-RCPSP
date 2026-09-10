@@ -60,15 +60,6 @@ def random_priorities(instance: Instance, seed: int) -> dict[ActivityId, float]:
     return {activity_id: rng.random() for activity_id in instance.activities}
 
 
-def baseline_makespans(instance: Instance, seed: int) -> dict[str, int]:
-    """Evaluate the deterministic scheduling baselines for one instance."""
-    return {
-        "fifo": generate_schedule(instance, priority_fifo).makespan,
-        "shortest": generate_schedule(instance, priority_shortest_duration).makespan,
-        "random": generate_schedule(instance, random_priorities(instance, seed)).makespan,
-    }
-
-
 def latest_start_times(instance: Instance, horizon: int | None = None) -> dict[ActivityId, int]:
     """Backward-pass latest start times.
 
@@ -97,13 +88,6 @@ def latest_start_times(instance: Instance, horizon: int | None = None) -> dict[A
         return bound
 
     return {activity_id: latest_start(activity_id) for activity_id in instance.activities}
-
-
-def priority_latest_start(instance: Instance) -> Callable[[Activity], object]:
-    """Priority rule LST: schedule the eligible activity with the smallest
-    latest start time first; ties break by activity id for determinism."""
-    latest = latest_start_times(instance)
-    return lambda activity: (latest[activity.id], activity.id)
 
 
 def generate_schedule(

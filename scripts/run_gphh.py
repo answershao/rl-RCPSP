@@ -40,7 +40,6 @@ if __package__ in {None, ""}:
 
 from scripts.common import (
     EVALUATION_SUITES,
-    SUITE_SPECS,
     jobs_for_suites,
     map_jobs,
     resolve_suite_ids,
@@ -91,12 +90,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mutation-prob", type=float, default=DEFAULT_MUTATION_PROB)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/gphh_rcpsp/default"))
     return parser.parse_args()
-
-
-def _suite_specs():
-    from scripts.common import SUITE_SPECS
-
-    return SUITE_SPECS
 
 
 def load_training_instances(data_root: Path, splits: Path, count: int):

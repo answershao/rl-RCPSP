@@ -7,8 +7,6 @@ schedulable by the canonical core kernel (``src.core.rcpsp.generate_schedule``)
 through the ``src.data.adapter`` bridge.
 """
 
-import pytest
-
 from src.core.rcpsp import generate_schedule
 from src.data.adapter import load_core_instance
 from src.data.parsers import load_instance

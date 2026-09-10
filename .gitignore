@@ -28,7 +28,7 @@ __MACOSX/
 # ---------- WorkBuddy workspace data (local memory / logs, not VCS material) ----------
 .workbuddy/
 
-# ---------- Datasets (4430 corpus + BKS xlsx; regenerate/provide externally) ----------
+# ---------- Datasets (protocol corpus + BKS xlsx; regenerate/provide externally) ----------
 # Root-anchored: a bare "data/" would also match the SOURCE package src/data/
 # (parsers.py / adapter.py / instances.py) and silently exclude it from VCS.
 /data/
@@ -36,7 +36,7 @@ __MACOSX/
 # ---------- Generated experiment outputs (all re-runnable via scripts + README) ----------
 outputs/
 # Note: root-level protocol artifacts below ARE committed on purpose:
-#   splits.json   -- the single split manifest (seed 20260909; regenerate with
+#   splits.json   -- the single split manifest (seed 20260910; regenerate with
 #                    scripts/generate_pool.py --manifest, see README)
 #   scripts/*.csv outputs are only produced under outputs/ and stay ignored.
 

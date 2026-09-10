@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -21,12 +21,6 @@ from src.envs.observation import (
     build_static_graph_cache,
 )
 from src.training.features import GINActorCriticHeads, SharedDirectedGINExtractor
-
-
-class PolicyEnvironment(Protocol):
-    def reset(self, *, seed: int | None = None): ...
-
-    def step(self, action): ...
 
 
 class GINActorCriticPolicy(ActorCriticPolicy):
@@ -206,17 +200,6 @@ def create_ppo(
         model.policy.features_extractor.compile(mode=compile_mode, dynamic=True)
         model.policy.mlp_extractor.compile(mode=compile_mode, dynamic=True)
     return model
-
-
-def run_policy_episode(model: PPO, env: PolicyEnvironment, *, seed: int | None = None) -> dict:
-    """Run one deterministic policy episode and return its terminal info."""
-    observation, _ = env.reset(seed=seed)
-    terminated = truncated = False
-    info = {}
-    while not (terminated or truncated):
-        action, _ = model.predict(observation, deterministic=True)
-        observation, _, terminated, truncated, info = env.step(action)
-    return info
 
 
 def evaluate_paths(

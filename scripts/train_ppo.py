@@ -35,7 +35,6 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.utils import set_random_seed
 
-from src.core.rcpsp import Instance
 from src.envs.multi_instance import partition_instance_catalog
 from src.envs.observation import (
     MAX_SUCCESSORS,

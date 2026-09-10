@@ -4,7 +4,7 @@
 逐活动学习调度策略，与**优先规则**（串行/并行 SGS × FIFO/SPT/…/LST/…/WCS）、**GA**（随机键）、
 **GPHH**（表达式树超启发式）基线对比。主协议包含 1216 个 generated 训练/验证实例和 2040 个 PSPLIB 测试实例，以 BKS 精确 gap 度量。
 
-> 数据划分协议、方法口径、端到端流程与重构路线图：见 **[docs/EXECUTION_FLOW.md](docs/EXECUTION_FLOW.md)**；
+> 数据划分协议、模块边界和端到端流程：见 **[docs/EXECUTION_FLOW.md](docs/EXECUTION_FLOW.md)**；
 > 逐步操作手册（S0–S6 命令 / 通过判据 / 排错）：见 **[docs/MAINLINE.md](docs/MAINLINE.md)**。
 > 本文档只给「怎么跑、产物放哪」的速查。
 
@@ -12,8 +12,9 @@
 
 ```bash
 conda activate rl                      # py3.12 + torch2.5 + SB3 2.7 + gymnasium 1.2 + numpy2
-python -m pytest -q                    # 快测（≈40s，含 SB3 短训）
-python -m pytest -q -W error           # R3 约定：无警告级失败
+python -m pytest -q -m 'not slow'      # 快测（含 SB3 短训）
+python -m pytest -q                    # 全量（含语料解析回归）
+python -m pytest -q -W error           # 全量且警告级失败
 python -m pytest -m slow               # 慢项：3256 个主协议实例解析回归
 python -m pytest -m "not slow"         # 仅快测
 ```
@@ -28,7 +29,7 @@ src/
   data/          parsers.py（.sm/.rcp 解析）· adapter.py（→core Instance 唯一入口
                  load_core_instance）· instances.py（splits.json 协议 / loader_for）
   core/          rcpsp.py（单项目内核：Instance + 串行/并行 SGS + 校验）
-                 rules.py（25 列优先规则）· ga.py · gphh.py · exact.py
+                 rules.py（25 列优先规则）· ga.py · gphh.py
   envs/          rcpsp_env.py · multi_instance.py · observation.py · sb3_env.py
   training/      ppo.py · features.py（GIN）· environments.py · callbacks.py
   visualization/ aon.py · gantt.py
@@ -38,7 +39,7 @@ scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一�
                  bench_ppo（训练吞吐扫描）compare_ppo_results extract_bks
                  aggregate_results visualize_instance
                  instance_stats（套件参数/覆盖度诊断）· generate_pool（生成训练池）
-tests/           14 个 test_*.py（65 用例）+ conftest
+tests/           13 个 test_*.py（65 用例）+ conftest
 splits.json      唯一切分协议（生成池 psp_grid_bal）
 ```
 
@@ -58,7 +59,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
 | 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --params outputs/instance_stats/instances.csv --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv` + `summary_by_regime.csv`（gap vs BKS、below-BKS 告警、RF×RS 分档） |
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
-| **一键步骤 2+4** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→GPHH→aggregate 合并出表；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
+| **一键 S2+S4+S6** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→可选 GPHH→aggregate；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
 
 `--suites` 合法 id：`psplib_j30/j60/j90/j120`、`psp_grid`（= 训练池，`scripts/common.py::SUITE_SPECS`）。
 **默认值就是 `psp_grid`**（`baselines`/`run_ga` 不带 `--suites` 时跑训练池，供 S3 用）；跑 benchmark 请显式指定，如 `--suites psplib_j30,psplib_j60,psplib_j90,psplib_j120`。`run_gphh --eval-suites` 的默认值则是全部评测套件（`EVALUATION_SUITES`，不含任何训练池）。

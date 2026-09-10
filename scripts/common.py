@@ -84,11 +84,6 @@ def find_instances(root: Path, suite: str) -> list[Path]:
     return paths
 
 
-def relative_posix(root: Path, path: Path) -> str:
-    """Data-root-relative POSIX path used as the stable per-instance ``file`` key."""
-    return path.resolve().relative_to(root.resolve()).as_posix()
-
-
 def resolve_suite_ids(raw: str) -> list[str]:
     """Split a comma-separated ``--suites`` value and validate every id."""
     suite_ids = [suite.strip() for suite in raw.split(",") if suite.strip()]
@@ -218,8 +213,7 @@ def print_suite_means(
     prefix: str = "",
 ) -> None:
     """Print ``suite (n=..): col=mean`` lines for every column, one per suite."""
-    for suite in sorted(group_by_suite(rows)):
-        suite_rows = group_by_suite(rows)[suite]
+    for suite, suite_rows in sorted(group_by_suite(rows).items()):
         means = " ".join(
             f"{column}={np.mean([row[column] for row in suite_rows]):.2f}"
             for column in columns

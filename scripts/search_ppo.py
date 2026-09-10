@@ -207,7 +207,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--torch-threads", type=int, default=20)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
-    parser.add_argument("--evaluation-seed", type=int, default=20260909)
+    parser.add_argument("--evaluation-seed", type=int, default=20260910)
     return parser.parse_args()
 
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Step 2 (+ step 4 merge) of the agreed pipeline, WITHOUT PPO training:
+# S2 + S4 + S6 of the agreed pipeline, WITHOUT PPO training:
 #   solve the test suites (PSPLIB j30-j120) with priority rules / GA
 #   (GPHH optional, off by default -- enable with RUN_GPHH=1),
 #   then merge everything into one comparison CSV (gap vs BKS).
 #
-# Step 0 (instance diagnostics) runs first: scripts/instance_stats writes
+# S2 (instance diagnostics) runs first: scripts/instance_stats writes
 #   outputs/instance_stats/instances.csv, which the aggregate stage needs to
 #   emit summary_by_regime.csv (RF level x RS quartile -- the main line reports
 #   per regime, pooled means hide the tight/loose difference).  Disable with
 #   RUN_STATS=0; the aggregate stage then drops --params and only writes
 #   merged_detail.csv + summary_by_suite.csv.
 #
-# Step 3 (PPO) runs separately via train_a800.sh / train_cpu.sh.  After a
+# S5 (PPO) runs separately via train_a800.sh / train_cpu.sh.  After a
 # trained run exists, re-run this script with WITH_PPO=1 to fold the
 # ppo_makespan column into the same merged table.
 #
@@ -90,9 +90,9 @@ stage_ready() {
     return 0
 }
 
-echo "== step 2/4: test-suite baselines (seed ${SEED}, suites ${SUITES}) =="
+echo "== S2 + S4 + S6: test-suite baselines (seed ${SEED}, suites ${SUITES}) =="
 
-# ---------------- stage 0: instance diagnostics (feeds --params) -------------
+# ---------------- S2: instance diagnostics (feeds --params) ------------------
 if [[ "${RUN_STATS}" == "1" ]] && stage_ready "instance_stats" "${OUT_STATS}/instances.csv"; then
     echo "[run ] instance_stats -> ${OUT_STATS}/instances.csv"
     "${PYTHON}" -m scripts.instance_stats \
@@ -102,7 +102,7 @@ if [[ "${RUN_STATS}" == "1" ]] && stage_ready "instance_stats" "${OUT_STATS}/ins
         --output-dir "${OUT_STATS}" 2>&1 | tee "${LOG_DIR}/stats_${RUN_STAMP}.log"
 fi
 
-# ---------------- stage 1: priority rules (fast) ----------------
+# ---------------- S4: priority rules (fast) ----------------
 if [[ "${RUN_RULES}" == "1" ]] && stage_ready "rules" "${OUT_RULES}"; then
     echo "[run ] rules -> ${OUT_RULES}"
     "${PYTHON}" -m scripts.baselines \
@@ -114,7 +114,7 @@ if [[ "${RUN_RULES}" == "1" ]] && stage_ready "rules" "${OUT_RULES}"; then
         --output-csv "${OUT_RULES}" 2>&1 | tee "${LOG_DIR}/rules_${RUN_STAMP}.log"
 fi
 
-# ---------------- stage 2: GA random keys (slowest; pop x gen x instances) ----
+# ---------------- S4: GA random keys (slowest; pop x gen x instances) ---------
 if [[ "${RUN_GA}" == "1" ]] && stage_ready "ga" "${OUT_GA}"; then
     echo "[run ] ga (pop=${GA_POPULATION} x gen=${GA_GENERATIONS}) -> ${OUT_GA}"
     "${PYTHON}" -m scripts.run_ga \
@@ -128,7 +128,7 @@ if [[ "${RUN_GA}" == "1" ]] && stage_ready "ga" "${OUT_GA}"; then
         --output-csv "${OUT_GA}" 2>&1 | tee "${LOG_DIR}/ga_${RUN_STAMP}.log"
 fi
 
-# ---------------- stage 3: GPHH (train on the protocol's train split) --------
+# ---------------- S4: GPHH (train on the protocol's train split) -------------
 if [[ "${RUN_GPHH}" == "1" ]]; then
     if stage_ready "gphh" "${OUT_GPHH_DIR}/eval_summary.csv"; then
         echo "[run ] gphh -> ${OUT_GPHH_DIR}"
@@ -144,7 +144,7 @@ if [[ "${RUN_GPHH}" == "1" ]]; then
     fi
 fi
 
-# ---------------- step 4: merge everything into one comparison table ----------
+# ---------------- S6: merge everything into one comparison table --------------
 if [[ "${RUN_AGGREGATE}" == "1" ]]; then
     AGG_GPHH_ARGS=()
     if [[ -f "${OUT_GPHH_DIR}/eval_summary.csv" ]]; then
@@ -157,7 +157,7 @@ if [[ "${RUN_AGGREGATE}" == "1" ]]; then
     if [[ "${WITH_PPO}" == "1" ]]; then
         if [[ ! -f "${PPO_SUMMARY}" ]]; then
             echo "WITH_PPO=1 but summary not found: ${PPO_SUMMARY}" >&2
-            echo "run step 3 first (train_a800.sh / train_cpu.sh) or fix PPO_SUMMARY" >&2
+            echo "run S5 first (train_a800.sh / train_cpu.sh) or fix PPO_SUMMARY" >&2
             exit 1
         fi
         AGG_PPO_ARGS=(--ppo "${PPO_SUMMARY}")
@@ -170,7 +170,7 @@ if [[ "${RUN_AGGREGATE}" == "1" ]]; then
         AGG_PARAMS_ARGS=(--params "${OUT_STATS}/instances.csv")
     else
         echo "[warn] instance_stats output missing -> summary_by_regime.csv will be skipped"
-        echo "       (stage 0 writes it; enable with RUN_STATS=1 and rerun)"
+        echo "       (S2 writes it; enable with RUN_STATS=1 and rerun)"
     fi
     "${PYTHON}" -m scripts.aggregate_results \
         --rules "${OUT_RULES}" \
