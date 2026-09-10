@@ -20,6 +20,9 @@ from src.core.rcpsp import Instance
 # RG300 generalization set reaches 89, so the policy-side successor tensor needs
 # this headroom to keep one model valid across every suite.
 MAX_SUCCESSORS = 96
+# The same scan puts the worst in-degree at 91 (RG300), so both directions share
+# the 96 headroom and the two degree features stay on a comparable scale.
+MAX_PREDECESSORS = 96
 RESOURCE_PROFILE_BIN_COUNT = 16
 RESOURCE_PROFILE_CHANNEL_COUNT = 2
 RESOURCE_PROFILE_FEATURE_COUNT = (
@@ -111,6 +114,7 @@ class StaticGraphCache:
     resource_demands: np.ndarray
     successor_indices: np.ndarray
     successor_counts: np.ndarray
+    predecessor_counts: np.ndarray
     downstream_durations: np.ndarray
     activity_mask: np.ndarray
 
@@ -141,6 +145,7 @@ def build_static_graph_cache(
         (instance_count, max_activities, max_successors), -1, dtype=np.int64
     )
     successor_counts = np.zeros((instance_count, max_activities), dtype=np.float32)
+    predecessor_counts = np.zeros((instance_count, max_activities), dtype=np.float32)
     downstream_durations = np.zeros((instance_count, max_activities), dtype=np.float32)
     activity_mask = np.zeros((instance_count, max_activities), dtype=np.float32)
 
@@ -171,12 +176,18 @@ def build_static_graph_cache(
             activity = instance.activities[activity_id]
             if len(activity.successors) > max_successors:
                 raise ValueError(f"activity {activity_id} has too many successors")
+            predecessor_count = len(instance.predecessors.get(activity_id, ()))
+            if predecessor_count > MAX_PREDECESSORS:
+                raise ValueError(f"activity {activity_id} has too many predecessors")
             durations[instance_index, node_index] = activity.duration / horizon
             resource_demands[
                 instance_index, node_index, :resource_count
             ] = np.asarray(activity.demand, dtype=np.float32) / capacity_scale
             successor_counts[instance_index, node_index] = (
                 len(activity.successors) / max_successors
+            )
+            predecessor_counts[instance_index, node_index] = (
+                predecessor_count / MAX_PREDECESSORS
             )
             downstream_durations[instance_index, node_index] = (
                 downstream_duration(activity_id) / horizon
@@ -192,6 +203,7 @@ def build_static_graph_cache(
         resource_demands=resource_demands,
         successor_indices=successor_indices,
         successor_counts=successor_counts,
+        predecessor_counts=predecessor_counts,
         downstream_durations=downstream_durations,
         activity_mask=activity_mask,
     )

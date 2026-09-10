@@ -126,6 +126,69 @@ class WidenPolicyTest(unittest.TestCase):
         finally:
             small_env.close()
 
+    def test_policy_is_bit_identical_across_caps_for_a_whole_episode(self):
+        """Driving both caps with the same actions must give identical outputs.
+
+        This is the property the training-cap shrink relies on.  Only the action
+        sampling RNG depends on the action-space size, never the policy itself.
+        """
+        small, small_env = self._build(SMALL_CAP)
+        try:
+            widened = widen_policy(
+                small,
+                instances=self.instances,
+                max_activities=LARGE_CAP,
+                max_resources=self.max_resources,
+                static_cache=build_static_graph_cache(
+                    self.instances,
+                    max_activities=LARGE_CAP,
+                    max_resources=self.max_resources,
+                ),
+                device="cpu",
+            )
+            large_env = make_multi_env(
+                [str(TEST_INSTANCE)],
+                max_activities=LARGE_CAP,
+                max_resources=self.max_resources,
+                instance_indices=[0],
+                catalog_size=len(self.instances),
+            )
+            try:
+                obs_small = small_env.reset()[0]
+                obs_large = large_env.reset()[0]
+                steps = 0
+                while True:
+                    small_tensor = torch.as_tensor(obs_small[None, :])
+                    large_tensor = torch.as_tensor(obs_large[None, :])
+                    with torch.no_grad():
+                        small_dist = small.policy.get_distribution(
+                            small_tensor
+                        ).distribution
+                        large_dist = widened.policy.get_distribution(
+                            large_tensor
+                        ).distribution
+                        small_value = small.policy.predict_values(small_tensor)
+                        large_value = widened.policy.predict_values(large_tensor)
+                    torch.testing.assert_close(
+                        large_dist.logits[0, :SMALL_CAP], small_dist.logits[0]
+                    )
+                    torch.testing.assert_close(
+                        large_dist.probs[0, :SMALL_CAP], small_dist.probs[0]
+                    )
+                    torch.testing.assert_close(large_value, small_value)
+                    action = int(small_dist.probs.argmax())
+                    obs_small, _, done_small, _, _ = small_env.step(action)
+                    obs_large, _, done_large, _, _ = large_env.step(action)
+                    steps += 1
+                    self.assertEqual(bool(done_small), bool(done_large))
+                    if bool(done_small) or steps > 64:
+                        break
+                self.assertGreater(steps, 1)
+            finally:
+                large_env.close()
+        finally:
+            small_env.close()
+
     def test_widening_rejects_smaller_caps_and_mismatched_catalogs(self):
         small, small_env = self._build(SMALL_CAP)
         try:

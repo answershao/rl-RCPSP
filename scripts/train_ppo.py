@@ -21,6 +21,12 @@ before the model is saved and evaluated (``src.training.ppo.widen_policy``);
 for a fixed instance the small and widened policies produce identical logits.
 This cuts training time by several times without changing the learned function.
 
+Note that the *trained* model is not bit-identical across caps even though the
+function is: the action space is ``Discrete(max_activities)`` and
+``torch.multinomial`` consumes RNG differently per category count, so stochastic
+rollouts diverge after the first action.  Treat a different training cap as a
+different random seed, and compare caps with deterministic evaluation.
+
 Evaluation writes ``ppo_eval_summary.csv`` with columns
 ``suite,file,n_activities,n_resources,ppo_makespan``, consumable by
 ``scripts/aggregate_results.py --ppo`` for the BKS-gap comparison table.

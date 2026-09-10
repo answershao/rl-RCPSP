@@ -84,6 +84,7 @@ def _cache_from_extractor(extractor: SharedDirectedGINExtractor) -> StaticGraphC
             "static_resource_demands",
             "static_successor_indices",
             "static_successor_counts",
+            "static_predecessor_counts",
             "static_downstream_durations",
             "static_activity_mask",
         )
@@ -94,6 +95,7 @@ def _cache_from_extractor(extractor: SharedDirectedGINExtractor) -> StaticGraphC
         resource_demands=arrays["static_resource_demands"],
         successor_indices=arrays["static_successor_indices"],
         successor_counts=arrays["static_successor_counts"],
+        predecessor_counts=arrays["static_predecessor_counts"],
         downstream_durations=arrays["static_downstream_durations"],
         activity_mask=arrays["static_activity_mask"],
     )
@@ -233,6 +235,14 @@ def widen_policy(
     are replaced by :func:`evaluate_paths` when a real evaluation split is
     loaded, so any catalog at the target cap is valid here; training callers
     pass their own training catalog.
+
+    Caveat for A/B comparisons: the *function* is bit-identical, but a full PPO
+    run is not.  The action space is ``Discrete(max_activities)`` and
+    ``torch.multinomial`` consumes a different amount of RNG depending on the
+    category count, so stochastic rollouts diverge from the second action
+    onwards.  Training at a smaller cap therefore behaves like a different
+    random seed rather than a bit-exact replay of training at the global cap;
+    compare caps with deterministic evaluation.
     """
     from src.envs.multi_instance import MultiInstanceRCPSPEnv
 

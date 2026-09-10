@@ -34,15 +34,35 @@ class DirectedGINLayer(nn.Module):
     def forward(
         self,
         embeddings: th.Tensor,
-        predecessor_sum: th.Tensor,
-        successor_sum: th.Tensor,
+        predecessor_message: th.Tensor,
+        successor_message: th.Tensor,
     ) -> th.Tensor:
         aggregate = (
             (1.0 + self.epsilon) * embeddings
-            + self.predecessor_projection(predecessor_sum)
-            + self.successor_projection(successor_sum)
+            + self.predecessor_projection(predecessor_message)
+            + self.successor_projection(successor_message)
         )
         return self.update(aggregate)
+
+
+def _edge_degrees(
+    edge_sources: th.Tensor,
+    edge_targets: th.Tensor,
+    edge_mask: th.Tensor,
+    node_count: int,
+    dtype: th.dtype,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Exact in-degree and out-degree per node, counted from the compact edges.
+
+    Padding edges carry ``edge_mask == False``, so they contribute zero weight.
+    """
+    weight = edge_mask.to(dtype)
+    shape = (edge_mask.shape[0], node_count)
+    in_degree = th.zeros(shape, dtype=dtype, device=edge_mask.device)
+    in_degree.scatter_add_(1, edge_targets, weight)
+    out_degree = th.zeros(shape, dtype=dtype, device=edge_mask.device)
+    out_degree.scatter_add_(1, edge_sources, weight)
+    return in_degree, out_degree
 
 
 def _aggregate_edge_messages(
@@ -50,8 +70,17 @@ def _aggregate_edge_messages(
     edge_sources: th.Tensor,
     edge_targets: th.Tensor,
     edge_mask: th.Tensor,
+    in_degree: th.Tensor,
+    out_degree: th.Tensor,
 ) -> tuple[th.Tensor, th.Tensor]:
-    """Sum messages in both directions using only compact, real graph edges."""
+    """Mean-pool messages in both directions using only compact, real edges.
+
+    Summing would scale each node's message with its degree, which explodes on
+    the dense RG300 graphs (in-degree up to 91, versus 3 for PSPLIB j30-j120)
+    while the encoder ends in ReLU so nothing cancels.  Dividing by the degree
+    keeps message magnitudes comparable across suites; the raw counts stay
+    available to the network as explicit node features.
+    """
     embedding_dim = embeddings.shape[-1]
     expanded_sources = edge_sources.unsqueeze(-1).expand(-1, -1, embedding_dim)
     expanded_targets = edge_targets.unsqueeze(-1).expand(-1, -1, embedding_dim)
@@ -63,7 +92,9 @@ def _aggregate_edge_messages(
     predecessor_sum.scatter_add_(1, expanded_targets, source_messages)
     successor_sum = th.zeros_like(embeddings)
     successor_sum.scatter_add_(1, expanded_sources, target_messages)
-    return predecessor_sum, successor_sum
+    predecessor_message = predecessor_sum / in_degree.clamp(min=1.0).unsqueeze(-1)
+    successor_message = successor_sum / out_degree.clamp(min=1.0).unsqueeze(-1)
+    return predecessor_message, successor_message
 
 
 class SharedDirectedGINExtractor(BaseFeaturesExtractor):
@@ -107,7 +138,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
         )
         activity_input_dim = (
-            6 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
+            7 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
         )
         self.activity_encoder = nn.Sequential(
             nn.Linear(activity_input_dim, hidden_dim),
@@ -139,6 +170,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             "static_resource_demands": static_cache.resource_demands,
             "static_successor_indices": static_cache.successor_indices,
             "static_successor_counts": static_cache.successor_counts,
+            "static_predecessor_counts": static_cache.predecessor_counts,
             "static_downstream_durations": static_cache.downstream_durations,
             "static_activity_mask": static_cache.activity_mask,
         }
@@ -210,6 +242,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         durations = self.static_durations[instance_indices]
         demands = self.static_resource_demands[instance_indices]
         successor_counts = self.static_successor_counts[instance_indices]
+        predecessor_counts = self.static_predecessor_counts[instance_indices]
         downstream_durations = self.static_downstream_durations[instance_indices]
         activity_mask = self.static_activity_mask[instance_indices]
         global_embedding = self.global_encoder(observations[:, layout.global_features])
@@ -222,6 +255,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
                 durations.unsqueeze(-1),
                 eligible.unsqueeze(-1),
                 successor_counts.unsqueeze(-1),
+                predecessor_counts.unsqueeze(-1),
                 downstream_durations.unsqueeze(-1),
                 demands,
                 dynamic,
@@ -236,12 +270,17 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         edge_sources = self.static_edge_sources[instance_indices]
         edge_targets = self.static_edge_targets[instance_indices]
         edge_mask = self.static_edge_mask[instance_indices]
+        in_degree, out_degree = _edge_degrees(
+            edge_sources, edge_targets, edge_mask, n, embeddings.dtype
+        )
 
         for layer in self.gin_layers:
-            predecessor_sum, successor_sum = _aggregate_edge_messages(
-                embeddings, edge_sources, edge_targets, edge_mask
+            predecessor_message, successor_message = _aggregate_edge_messages(
+                embeddings, edge_sources, edge_targets, edge_mask, in_degree, out_degree
             )
-            embeddings = layer(embeddings, predecessor_sum, successor_sum) * valid_nodes
+            embeddings = (
+                layer(embeddings, predecessor_message, successor_message) * valid_nodes
+            )
 
         return th.cat(
             [
@@ -252,6 +291,37 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             ],
             dim=1,
         )
+
+
+def pool_graph_embedding(
+    embeddings: th.Tensor,
+    activity_mask: th.Tensor,
+    global_embedding: th.Tensor,
+) -> th.Tensor:
+    """Summarize node embeddings with statistics that do not scale with node count.
+
+    Both the mean and the max are bounded by the per-node embedding range, so
+    the pooled vector stays in the same numeric range whether an instance has
+    32 activities (j30) or 302 (RG300).  A node-count-dependent sum would grow
+    linearly with the number of real activities and push the critic outside the
+    value range it was trained on.
+
+    Note this bounds the *node count* factor only.  Message passing still sums
+    over neighbours, so high-degree graphs such as RG300 can inflate the node
+    embeddings themselves; that has to be handled in the aggregation.
+    """
+    valid = activity_mask.unsqueeze(-1)
+    masked = embeddings * valid
+    node_count = valid.sum(dim=1)
+    embedding_mean = masked.sum(dim=1) / node_count.clamp(min=1.0)
+    sentinel = th.finfo(masked.dtype).min
+    embedding_max = masked.masked_fill(valid <= 0.5, sentinel).max(dim=1).values
+    # Every instance has at least one activity, but never let the sentinel leak
+    # into the critic for an all-padding row.
+    embedding_max = th.where(
+        node_count > 0.5, embedding_max, th.zeros_like(embedding_max)
+    )
+    return th.cat([embedding_mean, embedding_max, global_embedding], dim=1)
 
 
 class GINActorCriticHeads(nn.Module):
@@ -279,6 +349,8 @@ class GINActorCriticHeads(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
         self.critic = nn.Sequential(
+            # Input is [node-mean(E) | node-max(E) | global(G)], see
+            # pool_graph_embedding; both node statistics are size-stable.
             nn.Linear(2 * embedding_dim + global_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -316,10 +388,9 @@ class GINActorCriticHeads(nn.Module):
     def forward_critic(self, features: th.Tensor) -> th.Tensor:
         with self._autocast(features):
             embeddings, global_embedding, activity_mask, _ = self._unpack(features)
-            valid = activity_mask.unsqueeze(-1)
-            embedding_sum = (embeddings * valid).sum(dim=1)
-            embedding_mean = embedding_sum / valid.sum(dim=1).clamp(min=1.0)
-            graph_embedding = th.cat([embedding_sum, embedding_mean, global_embedding], dim=1)
+            graph_embedding = pool_graph_embedding(
+                embeddings, activity_mask, global_embedding
+            )
             values = self.critic(graph_embedding)
         return values.float()
 

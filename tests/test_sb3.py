@@ -24,7 +24,7 @@ from src.envs.rcpsp_env import RCPSPEnv
 from src.envs.sb3_env import make_sb3_env
 from src.training.environments import make_multi_env, make_single_env, make_vector_env
 from src.training.callbacks import TERMINAL_METRICS, RCPSPMetricsCallback
-from src.training.features import _aggregate_edge_messages
+from src.training.features import _aggregate_edge_messages, _edge_degrees
 from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import (
     create_ppo,
@@ -92,15 +92,50 @@ class Sb3Test(unittest.TestCase):
         predecessor_sum.scatter_add_(
             1, flat_targets.unsqueeze(-1).expand(-1, -1, 2), source_messages
         )
+        # Aggregation is degree-normalized, so the dense reference must divide
+        # each node's message by its in/out degree as well.
+        out_degree = valid.sum(dim=2).to(embeddings.dtype)
+        in_degree = torch.zeros(1, 4).scatter_add_(
+            1, flat_targets, valid_slots.reshape(1, -1)
+        )
+        successor_mean = successor_sum / out_degree.clamp(min=1).unsqueeze(-1)
+        predecessor_mean = predecessor_sum / in_degree.clamp(min=1).unsqueeze(-1)
 
         compact_predecessors, compact_successors = _aggregate_edge_messages(
             embeddings,
             torch.tensor([[0, 0, 1, 2]]),
             torch.tensor([[1, 2, 3, 3]]),
             torch.ones((1, 4), dtype=torch.bool),
+            in_degree,
+            out_degree,
         )
-        torch.testing.assert_close(compact_predecessors, predecessor_sum)
-        torch.testing.assert_close(compact_successors, successor_sum)
+        torch.testing.assert_close(compact_predecessors, predecessor_mean)
+        torch.testing.assert_close(compact_successors, successor_mean)
+
+    def test_edge_messages_are_averaged_over_neighbours_not_summed(self):
+        # Node 3 has two predecessors, so its message must be their mean.  A sum
+        # would double the magnitude and grow with in-degree, which is what
+        # makes dense RG300 graphs explode.
+        embeddings = torch.tensor(
+            [[[1.0, 2.0], [3.0, 5.0], [7.0, 11.0], [0.0, 0.0]]]
+        )
+        edge_sources = torch.tensor([[0, 0, 1, 2]])
+        edge_targets = torch.tensor([[1, 2, 3, 3]])
+        edge_mask = torch.ones((1, 4), dtype=torch.bool)
+        in_degree, out_degree = _edge_degrees(
+            edge_sources, edge_targets, edge_mask, 4, embeddings.dtype
+        )
+        torch.testing.assert_close(in_degree, torch.tensor([[0.0, 1.0, 1.0, 2.0]]))
+        torch.testing.assert_close(out_degree, torch.tensor([[2.0, 1.0, 1.0, 0.0]]))
+        predecessors, _ = _aggregate_edge_messages(
+            embeddings, edge_sources, edge_targets, edge_mask, in_degree, out_degree
+        )
+        torch.testing.assert_close(
+            predecessors[0, 3], (embeddings[0, 1] + embeddings[0, 2]) / 2
+        )
+        # An isolated node has no neighbours; the clamp must keep it at zero
+        # instead of dividing by zero.
+        torch.testing.assert_close(predecessors[0, 0], torch.zeros(2))
 
     def test_reference_rules_are_loaded_by_unique_instance_id(self):
         with TemporaryDirectory() as directory:
