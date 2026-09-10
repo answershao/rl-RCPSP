@@ -47,7 +47,7 @@ splits.json      唯一切分协议（seed 20260909，勿手改，用 scripts/ma
 |---|---|---|
 | （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output splits.json` | `splits.json`（当前版本逐字节一致） |
 | 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/CP + 与训练池的特征级交叠） |
-| 生成候选训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 5 --widen --workers 8 --output data/generated/psp_grid --manifest data/generated/psp_grid.json` | 生成 `.rcp` + `read_protocol` 兼容 manifest（可直接喂 `--splits`） |
+| 生成候选训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json` | 生成 `.rcp` + `read_protocol` 兼容 manifest（可直接喂 `--splits`）；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |

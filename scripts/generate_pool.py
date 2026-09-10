@@ -39,9 +39,13 @@ Two modes:
     Unbounded data, and the natural fit for an on-the-fly sampler.
 
 Usage:
-    python -m scripts.generate_pool --mode psp-grid --replicates 5 --widen \
+    python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --widen \
         --workers 8 --output data/generated/psp_grid \
         --manifest data/generated/psp_grid.json
+
+``--replicates`` takes a single int (uniform quota) or one int per size
+(n=30/60/90/120, ascending).  ``8,4,2,1`` balances each size's decision-state
+budget, since the per-instance training cost grows roughly with n^2.
 """
 
 from __future__ import annotations
@@ -213,6 +217,29 @@ def random_coordinates(
     ]
 
 
+def parse_replicates(value: str) -> dict[int, int]:
+    """``--replicates`` accepts either ``5`` or a per-size list ``8,4,2,1``.
+
+    A list maps to the PSPLIB sizes in ascending order (30/60/90/120); equal
+    values mean the classic uniform quota, descending values balance each
+    size's decision-state count (cost per instance grows ~n^2).
+    """
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    values = [int(p) for p in parts]
+    if not values or any(v < 1 for v in values):
+        raise argparse.ArgumentTypeError(
+            f"--replicates must be a positive int or 1-4 comma-separated positive ints, got {value!r}"
+        )
+    if len(values) == 1:
+        return {size: values[0] for size in sorted(PSPLIB_SIZES.values())}
+    if len(values) != len(PSPLIB_SIZES):
+        raise argparse.ArgumentTypeError(
+            f"--replicates list needs exactly {len(PSPLIB_SIZES)} values for sizes "
+            f"{sorted(PSPLIB_SIZES.values())}, got {len(values)}"
+        )
+    return dict(zip(sorted(PSPLIB_SIZES.values()), values))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("psp-grid", "random"), default="psp-grid")
@@ -229,12 +256,21 @@ def main() -> None:
         default=Path("data/generated/psp_grid.json"),
         help="manifest in the read_protocol schema, loadable via --splits",
     )
-    parser.add_argument("--replicates", type=int, default=5, help="instances per grid cell")
     parser.add_argument(
-        "--validation-replicates",
-        type=int,
-        default=1,
-        help="instances per grid cell held out for training-period validation",
+        "--replicates",
+        type=parse_replicates,
+        default=parse_replicates("5"),
+        metavar="N | N,N,N,N",
+        help="instances per grid cell: a single int, or per-size counts for "
+        "n=30/60/90/120 in ascending order (e.g. 8,4,2,1 balances the "
+        "decision-state budget because per-instance cost grows ~n^2)",
+    )
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        default=0.2,
+        help="fraction of cells per size whose last replicate is held out for "
+        "training-period validation (per-cell holdouts would starve small quotas)",
     )
     parser.add_argument("--seed", type=int, default=20260910)
     parser.add_argument("--workers", type=int, default=1)
@@ -309,18 +345,34 @@ def main() -> None:
     specs: list[dict] = []
     root = args.output.relative_to(args.data_root)
 
+    # Deterministic per-size validation holdout: every stride-th cell (within
+    # its size) contributes its *last* replicate to the validation split, so
+    # the holdout mirrors the train distribution even when a size gets a
+    # single replicate.
+    if not 0.0 < args.validation_fraction <= 1.0:
+        parser.error("--validation-fraction must be in (0, 1]")
+    stride_by_size: dict[int, int] = {
+        size: max(1, round(1.0 / args.validation_fraction))
+        for size in sorted({c[0] for c in coordinates})
+    }
+    cell_seen_by_size: dict[int, int] = {}
+
     for cell_index, (coordinate, nominal) in enumerate(
         zip(coordinates, labels if labels is not None else [None] * len(coordinates))
     ):
         n, rf, rs, nc = coordinate
         spec = GeneratorSpec(n, rf, rs, nc)
-        for replicate in range(args.replicates):
+        cell_seen = cell_seen_by_size.get(n, 0)
+        cell_seen_by_size[n] = cell_seen + 1
+        is_holdout_cell = cell_seen % stride_by_size[n] == 0
+        replicates = args.replicates[n]
+        for replicate in range(replicates):
             seed = int(rng.integers(0, 2**31 - 1))
             instance = generate(spec, seed)
             name = f"n{n}/c{cell_index:04d}_r{replicate:02d}"
             write_rcp(instance, args.data_root / root / f"{name}.rcp")
             rel = (root / f"{name}.rcp").as_posix()
-            is_validation = replicate < args.validation_replicates
+            is_validation = is_holdout_cell and replicate == replicates - 1
             (validation_entries if is_validation else train_entries).append(rel)
             spec_entry = {
                 "file": rel,
@@ -341,7 +393,8 @@ def main() -> None:
         "generator": "src/data/generator.py",
         "mode": args.mode,
         "seed": args.seed,
-        "replicates": args.replicates,
+        "replicates": {str(k): v for k, v in sorted(args.replicates.items())},
+        "validation_fraction": args.validation_fraction,
         "widen": bool(args.widen),
         "splits": {
             "rg30_train": sorted(train_entries),
@@ -358,7 +411,10 @@ def main() -> None:
     args.manifest.write_text(json.dumps(manifest, indent=1))
     args.manifest.with_suffix(".specs.json").write_text(json.dumps(specs, indent=1))
 
-    print(f"mode={args.mode} cells={len(coordinates)} replicates={args.replicates}")
+    print(
+        f"mode={args.mode} cells={len(coordinates)} "
+        f"replicates={ {k: v for k, v in sorted(args.replicates.items())} }"
+    )
     print(f"train={len(train_entries)} validation={len(validation_entries)}")
     print(f"wrote {args.output} and {args.manifest}")
 
