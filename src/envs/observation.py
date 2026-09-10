@@ -158,7 +158,16 @@ def build_static_graph_cache(
         activity_positions = {
             activity_id: index for index, activity_id in enumerate(activity_ids)
         }
-        horizon = max(sum(item.duration for item in instance.activities.values()), 1)
+        # Duration features are normalised by per-instance *maxima*, not by the
+        # duration sum.  A sum-based denominator grows with n (horizon = sum(d)
+        # ~ n * E[d]), so duration/horizon ~ 1/n drifts out of the training
+        # distribution as instance size leaves the training pool -- measured
+        # feature overlap with PSPLIB dropped 0.97 (j30) -> 0.22 (j120) because
+        # of exactly this.  Max-based denominators are size invariant and keep
+        # every feature inside [0, 1].
+        duration_scale = max(
+            (item.duration for item in instance.activities.values()), default=1
+        )
         capacity_scale = np.maximum(np.asarray(instance.capacities, dtype=np.float32), 1.0)
         longest_paths: dict[int, int] = {}
 
@@ -171,6 +180,16 @@ def build_static_graph_cache(
                 )
             return longest_paths[activity_id]
 
+        # Memoised full traversal; the per-node loop below then hits the cache.
+        downstream_scale = max(
+            (
+                downstream_duration(activity_id)
+                for activity_id in activity_ids
+                if instance.activities[activity_id].duration > 0
+            ),
+            default=1,
+        )
+
         activity_mask[instance_index, :activity_count] = 1.0
         for node_index, activity_id in enumerate(activity_ids):
             activity = instance.activities[activity_id]
@@ -179,7 +198,9 @@ def build_static_graph_cache(
             predecessor_count = len(instance.predecessors.get(activity_id, ()))
             if predecessor_count > MAX_PREDECESSORS:
                 raise ValueError(f"activity {activity_id} has too many predecessors")
-            durations[instance_index, node_index] = activity.duration / horizon
+            durations[instance_index, node_index] = activity.duration / max(
+                duration_scale, 1
+            )
             resource_demands[
                 instance_index, node_index, :resource_count
             ] = np.asarray(activity.demand, dtype=np.float32) / capacity_scale
@@ -190,7 +211,7 @@ def build_static_graph_cache(
                 predecessor_count / MAX_PREDECESSORS
             )
             downstream_durations[instance_index, node_index] = (
-                downstream_duration(activity_id) / horizon
+                downstream_duration(activity_id) / downstream_scale
             )
             for slot, successor in enumerate(activity.successors):
                 successor_indices[instance_index, node_index, slot] = (
