@@ -529,6 +529,7 @@ def main() -> None:
             validation_interval=args.validation_interval,
             validation_min_delta=args.validation_min_delta,
             validation_evaluator=validation_evaluator,
+            reference_rule_name=args.ref_rule,
         )
         model.learn(total_timesteps=args.total_timesteps, callback=callback, progress_bar=False)
         best_model_path = callback.best_model_path

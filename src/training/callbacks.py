@@ -19,7 +19,12 @@ TERMINAL_METRICS = (
 
 
 class RCPSPMetricsCallback(BaseCallback):
-    """Log rolling task metrics from terminal environment ``info`` dictionaries."""
+    """Log rolling task metrics from terminal environment ``info`` dictionaries.
+
+    Also drives validation-based model selection when a ``validation_evaluator``
+    is supplied: it records the rule-relative gap, saves ``best_model.zip`` on
+    every improvement, and optionally early-stops after a patience window.
+    """
 
     def __init__(
         self,
@@ -29,6 +34,7 @@ class RCPSPMetricsCallback(BaseCallback):
         validation_interval: int = 1,
         validation_min_delta: float = 0.0,
         validation_evaluator: Callable[[Any], float] | None = None,
+        reference_rule_name: str = "reference rule",
     ):
         super().__init__()
         if (
@@ -47,6 +53,10 @@ class RCPSPMetricsCallback(BaseCallback):
         self.validation_interval = validation_interval
         self.validation_min_delta = validation_min_delta
         self.validation_evaluator = validation_evaluator
+        # Name of the baseline rule the validation gap is measured against
+        # (``--ref-rule`` on the training script); used in log keys/messages so
+        # the reported metric never claims the wrong reference.
+        self.reference_rule_name = reference_rule_name
         self.best_validation_gap = np.inf
         self._patience_reference_gap = np.inf
         self.validation_evaluations = 0
@@ -98,13 +108,13 @@ class RCPSPMetricsCallback(BaseCallback):
             raise ValueError("validation evaluator returned a non-finite relative gap")
         self.validation_evaluations += 1
         self._last_evaluated_rollout = self._rollouts
-        self.logger.record("validation/fifo_relative_gap", gap)
+        self.logger.record("validation/rule_relative_gap", gap)
         if gap < self.best_validation_gap:
             self.best_validation_gap = gap
             if self.best_model_path is not None:
                 self.best_model_path.parent.mkdir(parents=True, exist_ok=True)
                 self.model.save(str(self.best_model_path))
-            self.logger.record("validation/best_fifo_relative_gap", gap)
+            self.logger.record("validation/best_rule_relative_gap", gap)
 
         significant_improvement = (
             gap < self._patience_reference_gap - self.validation_min_delta
@@ -118,8 +128,9 @@ class RCPSPMetricsCallback(BaseCallback):
                 self._stop_requested = True
                 self.logger.record("validation/early_stop", 1)
                 print(
-                    "Early stopping: no validation FIFO-relative-gap improvement "
-                    f"for {self.early_stop_patience} evaluations"
+                    "Early stopping: no validation improvement vs "
+                    f"{self.reference_rule_name} for "
+                    f"{self.early_stop_patience} evaluations"
                 )
 
     def _on_training_end(self) -> None:

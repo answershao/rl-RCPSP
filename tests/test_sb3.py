@@ -1,6 +1,8 @@
 import sys
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -49,6 +51,7 @@ class Sb3Test(unittest.TestCase):
             validation_interval=2,
             validation_min_delta=0.01,
             validation_evaluator=lambda _model: next(gaps),
+            reference_rule_name="serial_LST",
         )
         callback.model = Mock()
         callback.model.logger = Mock()
@@ -57,16 +60,24 @@ class Sb3Test(unittest.TestCase):
             callback.checkpoint_dir = Path(directory)
             callback._on_training_start()
             callback._on_rollout_end()
-            callback._on_rollout_start()
-            self.assertFalse(callback._stop_requested)
-            callback._on_rollout_end()
-            callback._on_rollout_start()
+            with redirect_stdout(StringIO()) as captured:
+                callback._on_rollout_start()
+                self.assertFalse(callback._stop_requested)
+                callback._on_rollout_end()
+                callback._on_rollout_start()
 
         self.assertTrue(callback._stop_requested)
         self.assertEqual(callback.validation_evaluations, 2)
         self.assertAlmostEqual(callback.best_validation_gap, 0.095)
         self.assertEqual(callback.model.save.call_count, 2)
         self.assertFalse(callback._on_step())
+        # The logged keys must not claim a stale reference rule (they used to
+        # read ``fifo_relative_gap`` while the gap was measured against LST).
+        logged = [entry.args[0] for entry in callback.model.logger.record.call_args_list]
+        self.assertIn("validation/rule_relative_gap", logged)
+        self.assertIn("validation/best_rule_relative_gap", logged)
+        self.assertFalse(any("fifo" in key for key in logged))
+        self.assertIn("serial_LST", captured.getvalue())
 
     def test_compact_edge_messages_match_successor_slot_aggregation(self):
         embeddings = torch.tensor(
