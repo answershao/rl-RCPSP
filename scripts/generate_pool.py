@@ -11,13 +11,16 @@ distribution shift measured by ``scripts/instance_stats.py``.
 
 This script closes that gap *without touching the test instances*:
 
-1. read the realised ``(n, RF, RS, NC)`` coordinate of every PSPLIB set
-   (one coordinate per ``.bas`` file, averaged over its 10 instances);
-2. recover the discrete factor levels -- RF and NC are already discrete, RS is
-   clustered into ``cells / (|RF| * |NC|)`` equal-frequency levels, which
-   recovers the generator's RS axis;
-3. rebuild the full factorial grid per size and generate fresh instances at
-   every cell with independent seeds;
+1. read the nominal factor design (NC / RF / RS levels per set) from the
+   RCPLIB workbook (``scripts/psplib_design.py``) -- authoritative, no
+   clustering heuristics;
+2. measure every PSPLIB set's ``(RF, RS, NC)`` *in this repo's own parameter
+   definitions* (the definitions ``src/data/generator.py`` targets and hits
+   exactly; the workbook's RS uses Kolisch's original formula and must not be
+   fed to the generator directly);
+3. map each nominal level to its generator-space coordinate (mean measured
+   value of the sets carrying that nominal level) and rebuild the full
+   factorial grid;
 4. optionally extend the grid one step beyond the observed range on each axis,
    so the benchmark cells become *interior* points rather than sitting on the
    boundary of the training envelope;
@@ -45,25 +48,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 
 from scripts.common import find_instances, map_jobs
 from scripts.instance_stats import instance_parameters
+from scripts.psplib_design import load_psplib_design
 from src.data.adapter import load_core_instance
 from src.data.generator import GeneratorSpec, generate, write_rcp
 
 # Suite id -> activity count, for the four PSPLIB sizes.
 PSPLIB_SIZES = {"psplib_j30": 30, "psplib_j60": 60, "psplib_j90": 90, "psplib_j120": 120}
 
+_SET_RE = re.compile(r"j(30|60|90|120)(\d+)_")
+
 
 def coordinate_row(path: Path, suite: str) -> dict:
-    """``(n, RF, RS, NC)`` for one instance; picklable for the spawn pool."""
+    """``(set_id, n, RF, RS, NC)`` for one instance; picklable for spawn pools."""
     params = instance_parameters(load_core_instance(path))
+    match = _SET_RE.match(path.stem)
     return {
         "suite": suite,
-        "set_id": path.stem.split("_")[0],
+        "set_id": int(match.group(2)) if match else -1,
         "n": params["n"],
         "RF": params["RF"],
         "RS": params["RS"],
@@ -73,28 +81,26 @@ def coordinate_row(path: Path, suite: str) -> dict:
 
 def psp_cell_coordinates(
     data_root: Path, workers: int
-) -> list[tuple[int, float, float, float]]:
-    """One averaged ``(n, RF, RS, NC)`` coordinate per PSPLIB set."""
+) -> dict[tuple[int, int], tuple[float, float, float]]:
+    """One averaged ``(RF, RS, NC)`` coordinate per PSPLIB set, in this repo's
+    parameter definitions (what ``GeneratorSpec`` targets)."""
     jobs = [
         (path, suite) for suite in PSPLIB_SIZES for path in find_instances(data_root, suite)
     ]
     rows = map_jobs(coordinate_row, jobs, workers)
 
-    by_cell: dict[tuple[str, str], list[dict]] = {}
+    by_cell: dict[tuple[str, int], list[dict]] = {}
     for row in rows:
         by_cell.setdefault((row["suite"], row["set_id"]), []).append(row)
 
-    coordinates = []
-    for (suite, _set_id), members in by_cell.items():
-        coordinates.append(
-            (
-                int(PSPLIB_SIZES[suite]),
-                float(np.mean([m["RF"] for m in members])),
-                float(np.mean([m["RS"] for m in members])),
-                float(np.mean([m["NC"] for m in members])),
-            )
+    coordinates: dict[tuple[int, int], tuple[float, float, float]] = {}
+    for (suite, set_id), members in by_cell.items():
+        coordinates[(PSPLIB_SIZES[suite], set_id)] = (
+            float(np.mean([m["RF"] for m in members])),
+            float(np.mean([m["RS"] for m in members])),
+            float(np.mean([m["NC"] for m in members])),
         )
-    return sorted(coordinates)
+    return coordinates
 
 
 def _cluster_levels(values: np.ndarray, k: int) -> list[float]:
@@ -120,20 +126,76 @@ def extract_levels(
     return levels
 
 
+def levels_from_design(
+    design: list,
+    cells_by_set: dict[tuple[int, int], tuple[float, float, float]],
+) -> dict[int, dict[str, dict[float, float]]]:
+    """Map every nominal design level to its generator-space coordinate.
+
+    Returns, per size, ``{"rf": {nominal: measured}, "rs": ..., "nc": ...}``
+    where "measured" is the mean of the set-level coordinates carrying that
+    nominal level.  The generator cannot hit Kolisch's RS definition directly,
+    so the nominal axis only supplies the *structure*; the coordinates stay in
+    this repo's definitions.
+    """
+    levels: dict[int, dict[str, dict[float, float]]] = {}
+    for size in sorted({s.size for s in design}):
+        members = [s for s in design if s.size == size and s.key in cells_by_set]
+        grouped: dict[str, dict[float, list[float]]] = {"rf": {}, "rs": {}, "nc": {}}
+        for s in members:
+            meas = cells_by_set[s.key]
+            grouped["rf"].setdefault(s.rf, []).append(meas[0])
+            grouped["rs"].setdefault(s.rs, []).append(meas[1])
+            grouped["nc"].setdefault(s.nc, []).append(meas[2])
+        levels[size] = {
+            axis: {nom: float(np.mean(vals)) for nom, vals in sorted(by_nom.items())}
+            for axis, by_nom in grouped.items()
+        }
+    return levels
+
+
+def levels_from_clustering(
+    cells_by_set: dict[tuple[int, int], tuple[float, float, float]],
+) -> dict[int, dict[str, dict[float, float]]]:
+    """Fallback when the RCPLIB workbook is unavailable: recover the RS axis by
+    equal-frequency clustering, with nominal labels equal to the measured
+    values (so the manifest simply carries the generator-space coordinates)."""
+    coordinates = [
+        (size, rf, rs, nc)
+        for (size, _set_id), (rf, rs, nc) in sorted(cells_by_set.items())
+    ]
+    recovered = extract_levels(coordinates)
+    return {
+        size: {axis: {v: v for v in vals} for axis, vals in axes.items()}
+        for size, axes in recovered.items()
+    }
+
+
 def build_grid(
-    levels: dict[int, dict[str, list[float]]],
+    levels: dict[int, dict[str, dict[float, float]]],
     *,
-    rs_extra: tuple[float, ...] = (),
-    nc_extra: tuple[float, ...] = (),
-) -> list[tuple[int, float, float, float]]:
-    """Full factorial grid, optionally extended past the observed range."""
+    rs_extra: dict[float, float] | None = None,
+    nc_extra: dict[float, float] | None = None,
+) -> tuple[list[tuple[int, float, float, float]], list[dict]]:
+    """Full factorial grid over the nominal levels, optionally extended past
+    the observed range.
+
+    Returns ``(coordinates, labels)``: generator-space ``(n, RF, RS, NC)``
+    tuples plus the nominal design coordinate each cell was built from.
+    """
+    rs_extra = rs_extra or {}
+    nc_extra = nc_extra or {}
     grid: list[tuple[int, float, float, float]] = []
-    for size, axes in levels.items():
-        for rf in axes["rf"]:
-            for rs in list(axes["rs"]) + list(rs_extra):
-                for nc in list(axes["nc"]) + list(nc_extra):
+    labels: list[dict] = []
+    for size, axes in sorted(levels.items()):
+        for rf_nom, rf in axes["rf"].items():
+            for rs_nom, rs in list(axes["rs"].items()) + list(rs_extra.items()):
+                for nc_nom, nc in list(axes["nc"].items()) + list(nc_extra.items()):
                     grid.append((size, float(rf), float(rs), float(nc)))
-    return grid
+                    labels.append(
+                        {"n": size, "RF": rf_nom, "RS": rs_nom, "NC": nc_nom}
+                    )
+    return grid, labels
 
 
 def random_coordinates(
@@ -184,6 +246,13 @@ def main() -> None:
         "the generated pool is a complete, pluggable protocol",
     )
     parser.add_argument(
+        "--bks-xlsx",
+        type=Path,
+        default=Path("data/bks/RCPLIB (Parameters and BKS).xlsx"),
+        help="RCPLIB workbook whose 'All' sheet carries the nominal PSPLIB "
+        "factor design; if missing, the grid is recovered by clustering",
+    )
+    parser.add_argument(
         "--random-count", type=int, default=2000, help="cells to sample in --mode random"
     )
     parser.add_argument(
@@ -194,21 +263,41 @@ def main() -> None:
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
+    labels: list[dict] | None = None
     if args.mode == "psp-grid":
         cells = psp_cell_coordinates(args.data_root, args.workers)
-        levels = extract_levels(cells)
-        for size, axes in levels.items():
-            print(
-                f"n={size}: RF {[round(v, 3) for v in axes['rf']]} "
-                f"RS {[round(v, 4) for v in axes['rs']]} "
-                f"NC {[round(v, 3) for v in axes['nc']]}"
+        if args.bks_xlsx.exists():
+            design = load_psplib_design(args.bks_xlsx)
+            levels = levels_from_design(design, cells)
+            source = f"nominal design from {args.bks_xlsx}"
+        else:
+            levels = levels_from_clustering(cells)
+            source = "equal-frequency clustering (workbook not found)"
+        for size, axes in sorted(levels.items()):
+            axes_text = " | ".join(
+                f"{axis} nom->{ {k: round(v, 3) for k, v in mapping.items()} }"
+                for axis, mapping in (
+                    ("RF", axes["rf"]),
+                    ("RS", axes["rs"]),
+                    ("NC", axes["nc"]),
+                )
             )
-        rs_extra: tuple[float, ...] = ()
-        nc_extra: tuple[float, ...] = ()
+            print(f"n={size}: {axes_text}")
+        print(f"levels recovered from {source}")
+        rs_extra: dict[float, float] = {}
+        nc_extra: dict[float, float] = {}
         if args.widen:
-            rs_extra = (round(max(max(a["rs"]) for a in levels.values()) * 1.6, 3),)
-            nc_extra = (round(max(max(a["nc"]) for a in levels.values()) + 0.3, 3),)
-        coordinates = build_grid(levels, rs_extra=rs_extra, nc_extra=nc_extra)
+            rs_extra = {
+                round(max(max(a["rs"]) for a in levels.values()) * 1.6, 3): round(
+                    max(max(a["rs"].values()) for a in levels.values()) * 1.6, 3
+                )
+            }
+            nc_extra = {
+                round(max(max(a["nc"]) for a in levels.values()) + 0.3, 3): round(
+                    max(max(a["nc"].values()) for a in levels.values()) + 0.3, 3
+                )
+            }
+        coordinates, labels = build_grid(levels, rs_extra=rs_extra, nc_extra=nc_extra)
         print(f"grid cells: {len(coordinates)} (observed PSPLIB sets: {len(cells)})")
     else:
         coordinates = random_coordinates(
@@ -220,7 +309,10 @@ def main() -> None:
     specs: list[dict] = []
     root = args.output.relative_to(args.data_root)
 
-    for cell_index, (n, rf, rs, nc) in enumerate(coordinates):
+    for cell_index, (coordinate, nominal) in enumerate(
+        zip(coordinates, labels if labels is not None else [None] * len(coordinates))
+    ):
+        n, rf, rs, nc = coordinate
         spec = GeneratorSpec(n, rf, rs, nc)
         for replicate in range(args.replicates):
             seed = int(rng.integers(0, 2**31 - 1))
@@ -230,14 +322,15 @@ def main() -> None:
             rel = (root / f"{name}.rcp").as_posix()
             is_validation = replicate < args.validation_replicates
             (validation_entries if is_validation else train_entries).append(rel)
-            specs.append(
-                {
-                    "file": rel,
-                    "split": "validation" if is_validation else "train",
-                    "requested": {"n": n, "RF": rf, "RS": rs, "NC": nc},
-                    "seed": seed,
-                }
-            )
+            spec_entry = {
+                "file": rel,
+                "split": "validation" if is_validation else "train",
+                "requested": {"n": n, "RF": rf, "RS": rs, "NC": nc},
+                "seed": seed,
+            }
+            if nominal is not None:
+                spec_entry["nominal"] = nominal
+            specs.append(spec_entry)
 
     manifest = {
         "protocol": (

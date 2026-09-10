@@ -52,7 +52,7 @@ FEATURE_COLUMNS = (
     "outdeg_norm",
     "indeg_norm",
 )
-PARAM_COLUMNS = ("n", "K", "RF", "RS", "NC", "CP", "sumdur", "res_lb", "res_dom")
+PARAM_COLUMNS = ("n", "K", "RF", "RS", "NC", "OS", "CP", "sumdur", "res_lb", "res_dom")
 FIELDS = ("group", "file", *PARAM_COLUMNS, *FEATURE_COLUMNS)
 
 
@@ -66,6 +66,10 @@ def instance_parameters(inst) -> dict:
     * ``RS`` -- mean over resources of ``(a_k - r_min_k) / (r_max_k - r_min_k)``
       with ``r_min_k = max_i d_ik`` and ``r_max_k = sum_i d_ik`` (lower = tighter)
     * ``NC`` -- arcs per node, counted over all nodes including the dummies
+    * ``OS`` -- order strength: precedence-feasible pairs in the transitive
+      closure over real activities, divided by ``C(n_real, 2)``.  This is the
+      RCPLIB workbook's definition (verified against it); the direct-arc ratio
+      would be roughly three times smaller and is NOT what PSPLIB reports.
     """
     ids = sorted(inst.activities)
     durations = np.array([inst.activities[i].duration for i in ids], dtype=float)
@@ -114,6 +118,29 @@ def instance_parameters(inst) -> dict:
             (downstream[nxt] for nxt in successors[node]), default=0.0
         )
     cp = float(downstream.max())
+
+    # Order strength over the transitive closure, as a bit mask per node so it
+    # stays cheap even at the global cap (302 activities).
+    index_of = {node: i for i, node in enumerate(ids)}
+    real_mask = 0
+    for i, node in enumerate(ids):
+        if durations[i] > 0:
+            real_mask |= 1 << i
+    descendants = [0] * len(ids)
+    for node in reversed(order):  # topological: successors are already done
+        mask = 0
+        for nxt in successors[node]:
+            j = index_of[nxt]
+            mask |= (1 << j) | descendants[j]
+        descendants[index_of[node]] = mask
+    reachable_pairs = sum(
+        bin(descendants[index_of[node]] & real_mask).count("1")
+        for i, node in enumerate(ids)
+        if durations[i] > 0
+    )
+    os_ = (
+        reachable_pairs / (n_real * (n_real - 1) / 2) if n_real > 1 else 0.0
+    )
 
     res_lb = 0.0
     for r in range(k):
