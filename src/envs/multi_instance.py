@@ -19,7 +19,7 @@ from gymnasium import spaces
 
 from src.core.rcpsp import Instance
 from src.data.adapter import load_core_instance
-from src.envs.rcpsp_env import INVALID_ACTION_PENALTY, RCPSPEnv
+from src.envs.rcpsp_env import RCPSPEnv
 from src.envs.observation import (
     MAX_SUCCESSORS,
     flatten_observation,
@@ -106,18 +106,14 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
             raise ValueError(f"action must be an integer in [0, {self.max_activities})")
         action = int(action)
         if action >= self.active_env.activity_count:
-            observation = self.active_env._observation()
-            return (
-                self._encode(observation),
-                INVALID_ACTION_PENALTY,
-                False,
-                False,
-                {
-                    "makespan": self.active_env._state.current_time,
-                    "eligible_mask": observation["eligible_mask"].copy(),
-                    "invalid_action": True,
-                },
+            # The global action cap can address padding slots.  The observation
+            # mask blocks them, but if it ever fails the episode still has to
+            # stay bounded and still carry the Monitor info_keywords, so this
+            # goes through the same rejection path as an illegal activity.
+            observation, reward, terminated, truncated, info = (
+                self.active_env.reject_action()
             )
+            return self._encode(observation), reward, terminated, truncated, info
         observation, reward, terminated, truncated, info = self._env.step(action)
         return self._encode(observation), reward, terminated, truncated, info
 
@@ -138,7 +134,7 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
         return flatten_observation(
             observation,
             env.instance.capacities,
-            env.horizon,
+            env.time_scale,
             instance_index=self.instance_indices[self._active_index],
             catalog_size=self.catalog_size,
             max_activities=self.max_activities,

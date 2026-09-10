@@ -27,7 +27,7 @@ class FlattenRCPSPObservation(gym.ObservationWrapper):
         return flatten_observation(
             observation,
             self.env.instance.capacities,
-            self.env.horizon,
+            self.env.time_scale,
             capacity_scale=self._capacity_scale,
             out=self._flat_buffer,
         )

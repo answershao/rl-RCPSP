@@ -13,7 +13,7 @@ from functools import cached_property, lru_cache
 
 import numpy as np
 
-from src.core.rcpsp import Instance
+from src.core.rcpsp import Instance, latest_start_times
 
 
 # Full-corpus bounds over the generated train/validation pool and held-out
@@ -121,6 +121,8 @@ class StaticGraphCache:
     predecessor_counts: np.ndarray
     downstream_durations: np.ndarray
     activity_mask: np.ndarray
+    slack_ratios: np.ndarray
+    on_critical_path: np.ndarray
 
     @property
     def instance_count(self) -> int:
@@ -152,6 +154,8 @@ def build_static_graph_cache(
     predecessor_counts = np.zeros((instance_count, max_activities), dtype=np.float32)
     downstream_durations = np.zeros((instance_count, max_activities), dtype=np.float32)
     activity_mask = np.zeros((instance_count, max_activities), dtype=np.float32)
+    slack_ratios = np.zeros((instance_count, max_activities), dtype=np.float32)
+    on_critical_path = np.zeros((instance_count, max_activities), dtype=np.float32)
 
     for instance_index, instance in enumerate(instances):
         activity_ids = tuple(sorted(instance.activities))
@@ -194,6 +198,37 @@ def build_static_graph_cache(
             default=1,
         )
 
+        # CPM slack, evaluated against a *critical-path* deadline instead of the
+        # duration sum.  With T = CP every slack is in [0, CP], so slack / CP is
+        # scale free across j30-j120, and slack == 0 marks exactly the critical
+        # path -- the single most informative structural signal in RCPSP (LST
+        # underlies MSLK, WCS and most GPHH terminals).  Normalising by sum(d)
+        # would reintroduce the n-dependent drift that the duration features
+        # already had to be fixed for.
+        earliest_starts: dict[int, int] = {}
+
+        def earliest_start(activity_id: int) -> int:
+            if activity_id not in earliest_starts:
+                earliest_starts[activity_id] = max(
+                    (
+                        earliest_start(predecessor)
+                        + instance.activities[predecessor].duration
+                        for predecessor in instance.predecessors.get(activity_id, ())
+                    ),
+                    default=0,
+                )
+            return earliest_starts[activity_id]
+
+        critical_path = max(
+            (
+                earliest_start(activity_id) + downstream_duration(activity_id)
+                for activity_id in activity_ids
+            ),
+            default=0,
+        )
+        latest_starts = latest_start_times(instance, horizon=critical_path)
+        slack_scale = max(critical_path, 1)
+
         activity_mask[instance_index, :activity_count] = 1.0
         for node_index, activity_id in enumerate(activity_ids):
             activity = instance.activities[activity_id]
@@ -202,6 +237,9 @@ def build_static_graph_cache(
             predecessor_count = len(instance.predecessors.get(activity_id, ()))
             if predecessor_count > MAX_PREDECESSORS:
                 raise ValueError(f"activity {activity_id} has too many predecessors")
+            slack = max(latest_starts[activity_id] - earliest_start(activity_id), 0)
+            slack_ratios[instance_index, node_index] = slack / slack_scale
+            on_critical_path[instance_index, node_index] = float(slack == 0)
             durations[instance_index, node_index] = activity.duration / max(
                 duration_scale, 1
             )
@@ -231,13 +269,15 @@ def build_static_graph_cache(
         predecessor_counts=predecessor_counts,
         downstream_durations=downstream_durations,
         activity_mask=activity_mask,
+        slack_ratios=slack_ratios,
+        on_critical_path=on_critical_path,
     )
 
 
 def flatten_observation(
     observation: Mapping[str, np.ndarray],
     capacities: tuple[int, ...],
-    horizon: int,
+    time_scale: int,
     *,
     instance_index: int = 0,
     catalog_size: int = 1,
@@ -320,7 +360,12 @@ def flatten_observation(
         ),
         casting="unsafe",
     )
-    result[layout.current_time] = observation["current_time"][0] / max(horizon, 1)
+    # ``time_scale`` is the env's per-instance reference makespan (see
+    # RCPSPEnv.time_scale), not the duration sum.  Clip because an arbitrary
+    # policy may overrun the reference and the flat Box is declared on [0, 1].
+    result[layout.current_time] = min(
+        observation["current_time"][0] / max(time_scale, 1), 1.0
+    )
     # Zero is reserved for malformed/padded observations.
     result[layout.instance_index] = (instance_index + 1) / catalog_size
     return result

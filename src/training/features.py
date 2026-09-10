@@ -30,6 +30,13 @@ class DirectedGINLayer(nn.Module):
             nn.Linear(hidden_dim, embedding_dim),
             nn.ReLU(),
         )
+        # Standard GIN recipe around the residual stream.  Mean aggregation
+        # alone only bounds the *degree* factor; the update's ReLU output still
+        # feeds the next layer unnormalised, so depth and the residual sum
+        # (1 + eps) * h + messages compound.  LayerNorm removes that drift,
+        # which is what makes the same weights portable across suites as
+        # different as j30 and RG300.
+        self.norm = nn.LayerNorm(embedding_dim)
 
     def forward(
         self,
@@ -42,7 +49,7 @@ class DirectedGINLayer(nn.Module):
             + self.predecessor_projection(predecessor_message)
             + self.successor_projection(successor_message)
         )
-        return self.update(aggregate)
+        return self.norm(embeddings + self.update(aggregate))
 
 
 def _edge_degrees(
@@ -174,7 +181,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
         )
         activity_input_dim = (
-            7 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
+            9 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
         )
         self.activity_encoder = nn.Sequential(
             nn.Linear(activity_input_dim, hidden_dim),
@@ -201,6 +208,12 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             self.instance_count, self.max_activities, self.max_successors
         ):
             raise ValueError("static cache does not match max_successors")
+        for name, array in (
+            ("slack_ratios", static_cache.slack_ratios),
+            ("on_critical_path", static_cache.on_critical_path),
+        ):
+            if array.shape != expected_node_shape:
+                raise ValueError(f"static cache {name} does not match max_activities")
         arrays = {
             "static_durations": static_cache.durations,
             "static_resource_demands": static_cache.resource_demands,
@@ -209,6 +222,8 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             "static_predecessor_counts": static_cache.predecessor_counts,
             "static_downstream_durations": static_cache.downstream_durations,
             "static_activity_mask": static_cache.activity_mask,
+            "static_slack_ratios": static_cache.slack_ratios,
+            "static_on_critical_path": static_cache.on_critical_path,
         }
         device = self.static_durations.device if hasattr(self, "static_durations") else None
         for name, array in arrays.items():
@@ -286,6 +301,8 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         successor_counts = self.static_successor_counts[instance_indices]
         predecessor_counts = self.static_predecessor_counts[instance_indices]
         downstream_durations = self.static_downstream_durations[instance_indices]
+        slack_ratios = self.static_slack_ratios[instance_indices]
+        on_critical_path = self.static_on_critical_path[instance_indices]
         activity_mask = self.static_activity_mask[instance_indices]
         global_embedding = self.global_encoder(observations[:, layout.global_features])
 
@@ -299,6 +316,8 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
                 successor_counts.unsqueeze(-1),
                 predecessor_counts.unsqueeze(-1),
                 downstream_durations.unsqueeze(-1),
+                slack_ratios.unsqueeze(-1),
+                on_critical_path.unsqueeze(-1),
                 demands,
                 dynamic,
                 global_by_activity,

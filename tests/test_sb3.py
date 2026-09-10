@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,7 +16,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
 
-from scripts.train_ppo import load_reference_rules
+from scripts.train_ppo import _torch_compile_available, load_reference_rules
 from src.data.adapter import load_core_instance
 from src.envs.observation import (
     ObservationLayout,
@@ -27,6 +27,7 @@ from src.envs.sb3_env import make_sb3_env
 from src.training.environments import make_multi_env, make_single_env, make_vector_env
 from src.training.callbacks import TERMINAL_METRICS, RCPSPMetricsCallback
 from src.training.features import (
+    DirectedGINLayer,
     _aggregate_compact_edge_messages,
     _aggregate_edge_messages,
     _compact_edge_indices,
@@ -152,6 +153,47 @@ class Sb3Test(unittest.TestCase):
         # An isolated node has no neighbours; the clamp must keep it at zero
         # instead of dividing by zero.
         torch.testing.assert_close(predecessors[0, 0], torch.zeros(2))
+
+    def test_gin_layers_normalise_activations_across_depth(self):
+        """LayerNorm + residual is what keeps deep message passing stable.
+
+        Mean aggregation only removes the degree factor; without the norm the
+        ReLU update feeds the next layer raw, so magnitude compounds with depth
+        (and with neighbour degree on RG300-style graphs).
+        """
+        torch.manual_seed(0)
+        layers = [DirectedGINLayer(8, 16) for _ in range(6)]
+        embeddings = torch.randn(2, 5, 8) * 50.0
+        predecessor = torch.randn(2, 5, 8) * 50.0
+        successor = torch.randn(2, 5, 8) * 50.0
+        for layer in layers:
+            embeddings = layer(embeddings, predecessor, successor)
+        self.assertTrue(torch.isfinite(embeddings).all())
+        # Each row is LayerNorm-ed, so the magnitude stays O(sqrt(dim)) instead
+        # of growing with depth (~1e3 for six plain GIN layers at this input).
+        self.assertLess(float(embeddings.abs().max()), 100.0)
+
+    def test_torch_compile_degrades_to_eager_instead_of_aborting(self):
+        """A missing inductor backend must disable compile, not kill the run."""
+        args = SimpleNamespace(
+            torch_compile=True,
+            compile_mode="default",
+            device="cpu",
+            torch_threads=1,
+            torch_interop_threads=1,
+        )
+        with patch("scripts.train_ppo.shutil.which", return_value=None):
+            self.assertFalse(_torch_compile_available(args))
+        with patch(
+            "scripts.train_ppo.torch.compile",
+            side_effect=RuntimeError("fatal error: omp.h: No such file"),
+        ):
+            self.assertFalse(_torch_compile_available(args))
+        with patch(
+            "scripts.train_ppo.torch.compile",
+            return_value=lambda tensor: tensor,
+        ):
+            self.assertTrue(_torch_compile_available(args))
 
     def test_unpadded_edge_aggregation_matches_padded_forward_and_gradient(self):
         embeddings = torch.randn(3, 5, 4, requires_grad=True)
@@ -326,7 +368,10 @@ class Sb3Test(unittest.TestCase):
             n_epochs=1, gin_layers=1,
             seed=1, device="cpu",
         )
-        self.assertEqual(model.gamma, 0.999)
+        # gamma=1 keeps the return exactly equal to the makespan objective; any
+        # gamma<1 would weight the terminal increment by gamma^(n-1) and make
+        # the objective drift with instance size.
+        self.assertEqual(model.gamma, 1.0)
         self.assertEqual(model.gae_lambda, 0.98)
         self.assertEqual(model.learning_rate, 2e-4)
         self.assertEqual(model.ent_coef, 0.01)

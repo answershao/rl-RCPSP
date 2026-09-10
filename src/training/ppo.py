@@ -81,6 +81,8 @@ def _cache_from_extractor(extractor: SharedDirectedGINExtractor) -> StaticGraphC
             "static_predecessor_counts",
             "static_downstream_durations",
             "static_activity_mask",
+            "static_slack_ratios",
+            "static_on_critical_path",
         )
     }
     return StaticGraphCache(
@@ -92,6 +94,8 @@ def _cache_from_extractor(extractor: SharedDirectedGINExtractor) -> StaticGraphC
         predecessor_counts=arrays["static_predecessor_counts"],
         downstream_durations=arrays["static_downstream_durations"],
         activity_mask=arrays["static_activity_mask"],
+        slack_ratios=arrays["static_slack_ratios"],
+        on_critical_path=arrays["static_on_critical_path"],
     )
 
 
@@ -102,9 +106,10 @@ def create_ppo(
     seed: int,
     device: str = "auto",
     n_steps: int = 256,
-    batch_size: int = 4096,
+    batch_size: int = 1024,
     n_epochs: int = 3,
-    gamma: float = 0.999,
+    # See scripts/train_ppo.py: gamma=1 makes the return exactly -makespan/scale.
+    gamma: float = 1.0,
     gae_lambda: float = 0.98,
     learning_rate: float = 2e-4,
     ent_coef: float = 0.01,
@@ -197,8 +202,15 @@ def create_ppo(
     if torch_compile:
         # Compile only the compute-heavy modules. Keeping the SB3 policy itself
         # unwrapped preserves its save/load and callback interfaces.
-        model.policy.features_extractor.compile(mode=compile_mode, dynamic=True)
-        model.policy.mlp_extractor.compile(mode=compile_mode, dynamic=True)
+        try:
+            model.policy.features_extractor.compile(mode=compile_mode, dynamic=True)
+            model.policy.mlp_extractor.compile(mode=compile_mode, dynamic=True)
+        except Exception as exc:  # noqa: BLE001 - compile is an optimisation only
+            # An inductor backend failure must never take the run down; the
+            # caller's probe normally catches this earlier (see
+            # scripts/train_ppo.py::configure_torch_runtime).
+            print(f"torch.compile failed ({type(exc).__name__}: {exc}); "
+                  "continuing with eager execution")
     return model
 
 

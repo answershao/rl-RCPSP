@@ -14,6 +14,8 @@ from src.envs.observation import (
 )
 from src.envs.sb3_env import make_sb3_env
 from src.core.rcpsp import Activity, Instance
+from src.data.adapter import load_core_instance
+from src.training.callbacks import TERMINAL_METRICS
 from tests import TEST_INSTANCE, TEST_INSTANCE_2
 
 
@@ -81,6 +83,69 @@ class MultiInstanceTest(unittest.TestCase):
         self.assertEqual(fields[-1].stop, layout.current_time)
         self.assertEqual(layout.current_time + 1, layout.instance_index)
         self.assertEqual(layout.instance_index + 1, layout.size)
+
+    def test_padded_actions_use_the_bounded_rejection_path(self) -> None:
+        """The global action cap can address padding slots.
+
+        The observation mask blocks those, but if it ever failed the episode
+        still has to stay bounded and still has to carry the Monitor
+        info_keywords -- otherwise SB3 raises KeyError mid-training.
+        """
+        env = MultiInstanceRCPSPEnv([TEST_INSTANCE], max_activities=64)
+        observation, _ = env.reset(seed=3)
+        padded_action = env.max_activities - 1
+        self.assertGreaterEqual(padded_action, env.active_env.activity_count)
+
+        total_reward = 0.0
+        while True:
+            observation, reward, terminated, truncated, info = env.step(padded_action)
+            total_reward += reward
+            self.assertEqual(reward, 0.0)
+            self.assertTrue(info["invalid_action"])
+            self.assertFalse(terminated)
+            if truncated:
+                break
+        for key in TERMINAL_METRICS:
+            self.assertIn(key, info)
+        self.assertEqual(total_reward, 0.0)
+        self.assertTrue(env.observation_space.contains(observation))
+
+    def test_static_slack_features_mark_the_critical_path(self) -> None:
+        """Slack is measured against a critical-path deadline, not sum(d).
+
+        That keeps every ratio inside [0, 1] and size invariant, which is what
+        lets LST / "on critical path" travel across j30-j120.
+        """
+        instance = Instance(
+            name="branching",
+            capacities=(2,),
+            activities={
+                0: Activity(0, 0, (0,), (1, 2)),
+                1: Activity(1, 5, (1,), (3,)),
+                2: Activity(2, 1, (1,), (3,)),
+                3: Activity(3, 0, (0,), ()),
+            },
+            predecessors={0: (), 1: (0,), 2: (0,), 3: (1, 2)},
+        )
+        cache = build_static_graph_cache([instance], max_activities=4, max_resources=2)
+        # CP = 5 through activity 1; activity 2 can float by 4 time units.
+        np.testing.assert_allclose(
+            cache.slack_ratios[0, :4], [0.0, 0.0, 0.8, 0.0], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            cache.on_critical_path[0, :4], [1.0, 1.0, 0.0, 1.0]
+        )
+
+        real = load_core_instance(TEST_INSTANCE)
+        padded = build_static_graph_cache(
+            [real],
+            max_activities=len(real.activities),
+            max_resources=real.resource_count,
+        )
+        self.assertGreaterEqual(float(padded.slack_ratios.min()), 0.0)
+        self.assertLessEqual(float(padded.slack_ratios.max()), 1.0)
+        self.assertEqual(set(np.unique(padded.on_critical_path)), {0.0, 1.0})
+        self.assertGreater(float(padded.on_critical_path.sum()), 0.0)
 
     def test_static_duration_features_use_per_instance_max(self):
         """Duration features are normalised by the per-instance maximum, not

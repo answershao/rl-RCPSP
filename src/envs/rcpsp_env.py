@@ -18,6 +18,7 @@ from src.core.rcpsp import (
     serial_sgs_insert,
     validate_schedule,
 )
+from src.core.rules import rule_makespan
 from src.data.adapter import load_core_instance
 from src.envs.observation import (
     DYNAMIC_ACTIVITY_FEATURE_COUNT,
@@ -27,7 +28,23 @@ from src.envs.observation import (
 )
 
 
-INVALID_ACTION_PENALTY = -1.0
+# A masked actor never emits an illegal action, so this path is a safety net
+# rather than a training signal.  It used to return -1.0, which is larger than
+# a *whole* episode return (about -1 to -2 once the reward is scaled by
+# ``time_scale``): if the mask ever failed (NaN logits, fp16 overflow, a
+# padding bug) a single rejected action would dominate the value target.
+# Zero keeps the net harmless; ``info["invalid_action"]`` still reports it and
+# the step budget below bounds the episode.
+INVALID_ACTION_PENALTY = 0.0
+
+# Static priority rule whose single-pass serial SGS makespan defines the
+# per-instance ``time_scale`` (see ``RCPSPEnv.time_scale``).
+TIME_SCALE_RULE = "LST"
+
+# A well-behaved episode schedules exactly one activity per step, so it ends
+# after ``activity_count`` steps.  Sustained rejected actions would otherwise
+# loop forever (nothing else bounds an episode); the budget truncates instead.
+STEP_BUDGET_FACTOR = 2
 
 
 @dataclass
@@ -43,7 +60,14 @@ class _ScheduleState:
     critical_lower_bound: int = 0
     resource_work: int = 0
     invalid_action_penalty: float = 0.0
+    steps: int = 0
     terminated: bool = False
+    aborted: bool = False
+
+    @property
+    def over(self) -> bool:
+        """True once the episode is finished for either reason."""
+        return self.terminated or self.aborted
 
     @classmethod
     def create(cls, activity_count: int, resource_count: int, horizon: int) -> _ScheduleState:
@@ -65,7 +89,9 @@ class _ScheduleState:
         self.critical_lower_bound = 0
         self.resource_work = 0
         self.invalid_action_penalty = 0.0
+        self.steps = 0
         self.terminated = False
+        self.aborted = False
 
 
 class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
@@ -96,6 +122,23 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self.activity_count = len(self.activity_ids)
         self.resource_count = self.instance.resource_count
         self.horizon = sum(activity.duration for activity in self.instance.activities.values())
+        # ``time_scale`` is the normalisation reference for every time-like
+        # feature (the six dynamic activity features, the current-time global
+        # feature and the resource-profile bins).  ``horizon`` -- the duration
+        # sum -- is a valid upper bound but it is 2.3-5.3x larger than any
+        # makespan a serial SGS actually produces, so normalising by it threw
+        # away most of each feature's range: measured on j120,
+        # ``makespan_increment`` only ever used 0.016 of [0, 1] and 124 of the
+        # 128 profile channels were identically zero.  One LST-priority serial
+        # SGS pass (~1 ms per instance, once) gives a size-consistent and
+        # policy-relevant reference instead.
+        # NOTE this is a *reference*, not an upper bound: a poor policy can
+        # exceed it, so every consumer clips to [0, 1] (see ``_observation``
+        # and ``flatten_observation``) instead of silently emitting values > 1.
+        self.time_scale = max(
+            int(rule_makespan(self.instance, TIME_SCALE_RULE, scheme="serial")), 1
+        )
+        self._step_budget = STEP_BUDGET_FACTOR * self.activity_count
 
         self.action_space = spaces.Discrete(self.activity_count)
         int_max = np.iinfo(np.int32).max
@@ -158,6 +201,15 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self._downstream_durations = np.asarray(
             [downstream_duration(item) for item in self.activity_ids], dtype=np.int32
         )
+        # Denominator for the ``makespan_increment`` feature.  The increment an
+        # insertion can cost is bounded by the largest single activity, so
+        # dividing by max(d) puts the feature on a suite-independent [0, 1]
+        # scale.  Dividing by ``time_scale`` (the other five features) left its
+        # ceiling at 0.09-0.20 depending on the suite -- a 2x distribution
+        # drift the actor head had to absorb -- and dividing by the candidate's
+        # *own* duration collapses it to {0, 1}, because an undelayed insertion
+        # costs exactly its duration (measured: 0 or 1.00, nothing between).
+        self._max_duration = max(int(self._durations.max(initial=0)), 1)
         # The horizon is a safe upper bound for every serial schedule. Keeping
         # usage in an array avoids Python list growth and nested update loops.
         self._state = _ScheduleState.create(
@@ -199,28 +251,16 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self, action: int
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         state = self._state
-        if state.terminated:
-            raise RuntimeError("step() called after the episode terminated; call reset()")
+        if state.over:
+            raise RuntimeError("step() called after the episode finished; call reset()")
         if not self.action_space.contains(action):
             raise ValueError(f"action must be an integer in [0, {self.activity_count})")
         requested_index = int(action)
         if not state.eligible_mask.any():
             raise RuntimeError("precedence graph is cyclic or has a missing predecessor")
-        invalid_action = not state.eligible_mask[requested_index]
-        if invalid_action:
-            state.invalid_action_penalty += INVALID_ACTION_PENALTY
-            observation = self._observation()
-            return (
-                observation,
-                INVALID_ACTION_PENALTY,
-                False,
-                False,
-                {
-                    "makespan": state.current_time,
-                    "eligible_mask": observation["eligible_mask"].copy(),
-                    "invalid_action": True,
-                },
-            )
+        if not state.eligible_mask[requested_index]:
+            return self.reject_action()
+        state.steps += 1
         chosen_index = requested_index
         chosen = self.activity_ids[chosen_index]
 
@@ -253,10 +293,16 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             state.current_time,
             finish + remaining_path_duration,
         )
-        makespan_penalty = -float(state.current_time - old_time) / max(self.horizon, 1)
+        # Dividing by ``time_scale`` (not the duration sum) makes the episode
+        # return exactly ``-makespan / time_scale`` at gamma=1, and pins the
+        # value target near O(1) instead of the ~0.15 a /horizon denominator
+        # produced -- which left the critic gradient two orders of magnitude
+        # weaker than the actor's.
+        scale = float(max(self.time_scale, 1))
+        makespan_penalty = -float(state.current_time - old_time) / scale
         critical_path_penalty = -float(
             state.critical_lower_bound - old_critical_lower_bound
-        ) / max(self.horizon, 1)
+        ) / scale
         reward = makespan_penalty + self.reward_shaping_coef * critical_path_penalty
         state.terminated = len(state.starts) == self.activity_count
 
@@ -271,28 +317,77 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         }
         if state.terminated:
             info["schedule"] = self.schedule
-            # Keep terminal metrics scalar so Monitor and vectorized SB3
-            # environments can persist them in their episode records.
+        return self._finalize(observation, reward, info)
+
+    def reject_action(
+        self,
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Advance an episode that received an action the mask should have blocked.
+
+        Also used by the padded multi-instance wrapper, whose action space is
+        the global activity cap and can therefore address indices beyond this
+        instance's ``activity_count``.  The step still counts against the budget
+        so sustained rejection truncates the episode instead of looping.
+        """
+        state = self._state
+        if state.over:
+            raise RuntimeError("step() called after the episode finished; call reset()")
+        state.steps += 1
+        state.invalid_action_penalty += INVALID_ACTION_PENALTY
+        observation = self._observation()
+        return self._finalize(
+            observation,
+            INVALID_ACTION_PENALTY,
+            {
+                "makespan": state.current_time,
+                "eligible_mask": observation["eligible_mask"].copy(),
+                "invalid_action": True,
+            },
+        )
+
+    def _finalize(
+        self,
+        observation: dict[str, np.ndarray],
+        reward: float,
+        info: dict[str, Any],
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Attach episode metrics and decide whether to truncate.
+
+        A healthy episode schedules one activity per step and terminates after
+        ``activity_count`` steps.  The budget only bites when the action mask
+        failed and the policy keeps proposing illegal actions: the episode is
+        truncated (not terminated) instead of looping forever.
+        """
+        state = self._state
+        truncated = False
+        if not state.terminated and state.steps >= self._step_budget:
+            state.aborted = True
+            truncated = True
+            info["aborted"] = True
+        if state.terminated or truncated:
+            scale = float(max(self.time_scale, 1))
+            # Monitor persists ``TERMINAL_METRICS`` by direct dict lookup, so
+            # these keys must exist on truncated episodes as well.  ``schedule``
+            # stays termination-only: an aborted episode has no complete
+            # schedule to validate.
             info.update(
                 {
-                    "normalized_makespan": state.current_time / max(self.horizon, 1),
+                    "normalized_makespan": state.current_time / scale,
                     "resource_utilization": self._resource_utilization(state.current_time),
                     "activity_count": self.activity_count,
-                    "episode_makespan_penalty": -state.current_time / max(self.horizon, 1),
+                    "episode_makespan_penalty": -state.current_time / scale,
                     "episode_critical_path_penalty": (
-                        -state.critical_lower_bound / max(self.horizon, 1)
+                        -state.critical_lower_bound / scale
                     ),
                     "episode_invalid_action_penalty": state.invalid_action_penalty,
                     "episode_reward": (
-                        -state.current_time / max(self.horizon, 1)
-                        - self.reward_shaping_coef
-                        * state.critical_lower_bound
-                        / max(self.horizon, 1)
+                        -state.current_time / scale
+                        - self.reward_shaping_coef * state.critical_lower_bound / scale
                         + state.invalid_action_penalty
                     ),
                 }
             )
-        return observation, reward, state.terminated, False, info
+        return observation, reward, state.terminated, truncated, info
 
     @property
     def schedule(self) -> Schedule:
@@ -313,9 +408,22 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         return used / capacity if capacity > 0 else 0.0
 
     def _profile_range(self, bin_index: int) -> tuple[int, int]:
-        start = (bin_index * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
-        stop = ((bin_index + 1) * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
-        if start == stop and self.horizon > 0:
+        """Bin edges over ``[0, time_scale)``, final bin widened to ``horizon``.
+
+        Spreading the bins over the reference horizon instead of the duration
+        sum puts all of them where activities are actually scheduled.  The
+        final bin is widened to the full usage horizon because ``time_scale``
+        is only a reference: a policy can overrun it, and those insertions must
+        not silently fall outside the profile.
+        """
+        span = max(self.time_scale, 1)
+        start = (bin_index * span) // RESOURCE_PROFILE_BIN_COUNT
+        stop = ((bin_index + 1) * span) // RESOURCE_PROFILE_BIN_COUNT
+        if bin_index == RESOURCE_PROFILE_BIN_COUNT - 1:
+            stop = max(stop, self.horizon)
+        # Degenerate spans (very short instances) would otherwise produce empty
+        # bins; collapse them onto the first available slot.
+        if start >= stop and self.horizon > 0:
             start = min(start, self.horizon - 1)
             stop = start + 1
         return start, stop
@@ -371,7 +479,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self._current_time[0] = state.current_time
         dynamic = self._dynamic_activity_features
         dynamic.fill(0.0)
-        horizon = max(self.horizon, 1)
+        scale = float(max(self.time_scale, 1))
         for activity_index in np.flatnonzero(eligible_mask):
             activity_id = self.activity_ids[int(activity_index)]
             ready = max(
@@ -388,13 +496,17 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
                 capacity_limit_array=self._capacity_limits[activity_index],
                 current_makespan=state.current_time,
             )
+            # Clipped because a bad policy can schedule past the reference
+            # horizon; the observation space declares [0, 1].  Note the fifth
+            # feature is scaled by the largest activity, not by ``time_scale``
+            # -- see ``self._max_duration``.
             dynamic[activity_index] = (
-                ready / horizon,
-                start / horizon,
-                finish / horizon,
-                (start - ready) / horizon,
-                max(0, finish - state.current_time) / horizon,
-                (start + self._downstream_durations[activity_index]) / horizon,
+                min(ready / scale, 1.0),
+                min(start / scale, 1.0),
+                min(finish / scale, 1.0),
+                min(max(start - ready, 0) / scale, 1.0),
+                min(max(finish - state.current_time, 0) / self._max_duration, 1.0),
+                min((start + self._downstream_durations[activity_index]) / scale, 1.0),
             )
         return {
             "activity_status": status,

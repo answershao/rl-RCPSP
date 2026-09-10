@@ -61,9 +61,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-timesteps", type=int, default=6_400_000)
     parser.add_argument("--n-envs", type=int, default=16)
     parser.add_argument("--n-steps", type=int, default=256)
-    parser.add_argument("--batch-size", type=int, default=4096)
-    parser.add_argument("--n-epochs", type=int, default=5)
-    parser.add_argument("--gamma", type=float, default=0.999)
+    # Update cost scales with n_epochs * rollout, not with the minibatch count,
+    # so a smaller minibatch buys optimiser steps at (nearly) constant cost.
+    # 16 * 256 = 4096 used to equal batch_size exactly: one minibatch, hence
+    # 3 gradient steps per rollout.  1024 gives 4 minibatches / 12 steps on the
+    # same rollout and the same wall clock.
+    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--n-epochs", type=int, default=3)
+    # gamma=1 keeps the episode return exactly equal to the makespan objective.
+    # With gamma<1 the return is sum_k gamma^k * dT_k / scale, so the terminal
+    # increment is weighted by gamma^(n-1), which drifts with the number of
+    # activities (0.97 on j30 vs 0.89 on j120 and 0.74 on RG300): a mixed-size
+    # training pool then fits a *family* of different objectives.  Episodes are
+    # finite, transitions are deterministic and GAE is reset per rollout, so
+    # gamma=1 is safe here and is what makes the critical-path shaping term
+    # (coef * (makespan - CP) telescoping) strictly potential-based.
+    parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--gae-lambda", type=float, default=0.98)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--ent-coef", type=float, default=0.005)
@@ -170,9 +183,8 @@ def resolve_device(requested: str) -> str:
 def configure_torch_runtime(args: argparse.Namespace) -> None:
     torch.set_num_threads(args.torch_threads)
     torch.set_num_interop_threads(args.torch_interop_threads)
-    if args.torch_compile and shutil.which("g++") is None:
-        print("g++ is unavailable; disabling torch.compile and using eager execution")
-        args.torch_compile = False
+    if args.torch_compile:
+        args.torch_compile = _torch_compile_available(args)
     if not args.device.startswith("cuda"):
         if args.mixed_precision != "none":
             print("mixed precision requested without CUDA; disabling it")
@@ -182,6 +194,42 @@ def configure_torch_runtime(args: argparse.Namespace) -> None:
     torch.backends.cuda.matmul.allow_tf32 = args.cuda_matmul_precision != "highest"
     if args.mixed_precision == "bf16" and not torch.cuda.is_bf16_supported():
         raise RuntimeError("the selected CUDA device does not support bf16")
+
+
+def _torch_compile_available(args: argparse.Namespace) -> bool:
+    """Verify torch.compile really works on this host before the run starts.
+
+    ``shutil.which("g++")`` is necessary but not sufficient: inductor also needs
+    the rest of the C++ toolchain, and images that ship g++ without ``omp.h``
+    raise ``BackendCompilerFailed``.  That used to abort training *after* it had
+    already started, so compile a throwaway function first -- with
+    ``suppress_errors`` OFF, otherwise dynamo silently falls back to eager and
+    the probe would report success on a host whose backend cannot build
+    anything.  Once the probe passes, ``suppress_errors`` is switched on as a
+    second net for the real graphs.
+    """
+    if shutil.which("g++") is None:
+        print("g++ is unavailable; disabling torch.compile and using eager execution")
+        return False
+    dynamo_config = getattr(torch, "_dynamo", None)
+    if dynamo_config is not None:
+        dynamo_config.config.suppress_errors = False
+    try:
+        probe = torch.compile(
+            lambda tensor: tensor.sin().cos(), mode=args.compile_mode, dynamic=True
+        )
+        probe(torch.zeros(8, device=torch.device(args.device)))
+    except Exception as exc:  # noqa: BLE001 - any backend failure must degrade
+        print(
+            f"torch.compile probe failed ({type(exc).__name__}); disabling "
+            "torch.compile and using eager execution "
+            "(fix: install OpenMP / set OMP_PREFIX, or keep TORCH_COMPILE=0)"
+        )
+        return False
+    if dynamo_config is not None:
+        dynamo_config.config.suppress_errors = True
+    print(f"torch.compile verified: mode={args.compile_mode}")
+    return True
 
 
 def load_reference_rules(path: Path, column: str) -> dict[str, int]:

@@ -96,9 +96,9 @@ cp data/generated/psp_grid_bal.json splits.json    # manifest 即协议
 | 项 | 内容 |
 |---|---|
 | 输入 | `src/data/generator.py` + `scripts/psplib_design.py`（读 RCLIB xlsx 的 `All` sheet 名义因子网格）+ **当前 `splits.json`**（`--splits`，其 `evaluation` 组会被原样搬到新 manifest） |
-| 产物 | `data/generated/psp_grid_bal/{n30,n60,n90,n120}/*.rcp`（1216 个）+ `psp_grid_bal.json`（manifest）+ `psp_grid_bal.specs.json`（生成参数留档） |
-| 通过判据 | `counts.train=1088`、`counts.validation=128`、每种规模 32 个 validation、`cells=336` |
-| 何时跳过 | 协议不变就**不要重跑**（seed 20260910 可复现；重跑会得到同一批实例） |
+| 产物 | `data/generated/psp_grid_bal/{n30,n60,n90,n120}/*.rcp`（1216 个）+ `psp_grid_bal.json`（manifest）+ `psp_grid_bal.specs.json`（生成参数留档）。⚠️ 后两者的 `splits` / 每条 `split` 字段是**派生量**，协议（`splits.json`）一改就必须同步重生，否则 `tests/test_protocol_suites.py::test_generated_validation_split_is_parameter_stratified` 会红（2026-09-10 就是这么漏过一次） |
+| 通过判据 | `counts.train=1088`、`counts.validation=128`、每种规模 32 个 validation、`cells=336`；且 `psp_grid_bal.json` 与 `splits.json` 内容一致、`specs` 的 `split` 字段与之一致 |
+| 何时跳过 | 协议不变就**不要重跑**。实测（2026-09-10，沙箱重跑 sha256 全文比对）：实例文件**完全可复现**（1216/1216 一致），但 **validation 划分不可复现**——当前代码 + `--seed 20260910 --validation-per-size 32` 只重现 128 个 holdout 单元中的 108 个（20 个不同）。⟹ `splits.json` 是唯一权威冻结件（已被 git 跟踪，`data/` 反而在 gitignore 里），**不要靠重跑 S1 去重建切分** |
 | 常见失败 | ① `--replicates` 写成 4 个值的列表时必须对应 n=30/60/90/120 升序；② `--widen` 关掉会让基准格子落在训练包络边界上而不是内部点 |
 
 参数含义：`--replicates` 单值=各规模同配额，列表=按规模配平（单实例决策状态成本 ≈n²，故 8/4/2/1 让各规模训练预算接近）；
@@ -189,9 +189,12 @@ bash train_a800.sh
 
 常用环境变量：`RUN_DIR`（默认 `outputs/experiments/ppo/cpu_runs/cpu_<时间戳>`）、`REF_RULES`、
 `TOTAL_TIMESTEPS`（默认 1e7）、`SEED`（默认 17）、`EVAL_ALL=1`（默认训练后评全部 evaluation 组）、
-`N_ENVS/N_STEPS/BATCH_SIZE/N_EPOCHS/TORCH_THREADS`，以及 `CRITICAL_PATH_SHAPING`（默认 0.5，
-设为 0 关闭）。CPU 与 A800 入口默认使用同一套 PPO 优化参数：`lr=2e-4`、`n_epochs=5`、
+`N_ENVS/N_STEPS/BATCH_SIZE/N_EPOCHS/TORCH_THREADS/TORCH_COMPILE/COMPILE_MODE`，以及
+`CRITICAL_PATH_SHAPING`（默认 0.5，设为 0 关闭）。CPU 与 A800 入口默认使用同一套 PPO 优化参数：
+`lr=2e-4`、`n_epochs=3`、`batch_size=1024`（rollout 12288 → 12 个 minibatch）、`gamma=1.0`、
 `ent_coef=0.005`、`vf_coef=0.5`，并在 validation 无改善一段时间后早停。
+`TORCH_COMPILE=1`（CPU 默认开，`COMPILE_MODE=default`）会在启动时探针验证 inductor 后端，
+失败只降级为 eager（代价：失败探针约 100 s），详见 README「关键口径」。
 
 关键口径：generated 训练/验证和 PSPLIB 测试统一使用 122 节点 cap，不执行模型扩宽。
 
