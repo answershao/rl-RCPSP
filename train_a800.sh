@@ -17,7 +17,11 @@ export PYTHONUNBUFFERED=1
 RUN_DIR="${RUN_DIR:-outputs/experiments/ppo/a800_runs/a800_$(date +%Y%m%d_%H%M%S)}"
 DATA_ROOT="${DATA_ROOT:-data}"
 SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
-REF_RULES="${REF_RULES:-outputs/rules_rg30/makespan_summary.csv}"
+# Reference-rule makespans for the validation split (checkpoint selection).
+# Build it first (docs/EXECUTION_FLOW.md S3):
+#   python -m scripts.baselines --data-root data --instance-workers 8 \
+#     --output-csv outputs/rules_psp_grid/makespan_summary.csv
+REF_RULES="${REF_RULES:-outputs/rules_psp_grid/makespan_summary.csv}"
 LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo}"
 mkdir -p "${LOG_DIR}"
 TRAIN_LOG_FILE="${LOG_DIR}/a800_$(date +%Y%m%d_%H%M%S).log"
@@ -31,9 +35,10 @@ LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 N_ENVS="${N_ENVS:-48}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6400000}"
 EVAL_ALL="${EVAL_ALL:-1}"
-# Train on the smallest padded graph covering the training pool (32 for RG30)
-# and widen the policy to the global cap before evaluation; the GIN/actor run on
-# every padded node, so this removes the wasted compute on zero nodes.
+# Train on the smallest padded graph covering the training pool (122 for the
+# current generated pool psp_grid_bal) and widen the policy to the global cap;
+# the GIN/actor run on every padded node, so this removes the wasted compute on
+# zero nodes.
 TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
 
 EVAL_ARGS=()

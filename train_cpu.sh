@@ -19,7 +19,11 @@ RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-outputs/experiments/ppo/cpu_runs/cpu_${RUN_STAMP}}"
 DATA_ROOT="${DATA_ROOT:-data}"
 SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
-REF_RULES="${REF_RULES:-outputs/rules_rg30/makespan_summary.csv}"
+# Reference-rule makespans for the validation split (checkpoint selection).
+# Build it first (docs/EXECUTION_FLOW.md S3):
+#   python -m scripts.baselines --data-root data --instance-workers 8 \
+#     --output-csv outputs/rules_psp_grid/makespan_summary.csv
+REF_RULES="${REF_RULES:-outputs/rules_psp_grid/makespan_summary.csv}"
 LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo}"
 mkdir -p "${LOG_DIR}"
 TRAIN_LOG_FILE="${LOG_DIR}/cpu_${RUN_STAMP}.log"
@@ -54,9 +58,10 @@ VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SEED="${SEED:-17}"
 EVAL_ALL="${EVAL_ALL:-0}"
-# Train on the smallest padded graph that covers the training pool (32 for RG30)
-# and widen the policy to the global cap before evaluation. Set to the global
-# cap, or pass an explicit integer, to disable the widening path.
+# Train on the smallest padded graph that covers the training pool (122 for the
+# current generated pool psp_grid_bal) and widen the policy to the global cap
+# before evaluation.  Set to the global cap, or pass an explicit integer, to
+# disable the widening path.
 TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
 
 EVAL_ARGS=()

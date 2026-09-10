@@ -4,6 +4,13 @@
 #   (GPHH optional, off by default -- enable with RUN_GPHH=1),
 #   then merge everything into one comparison CSV (gap vs BKS).
 #
+# Step 0 (instance diagnostics) runs first: scripts/instance_stats writes
+#   outputs/instance_stats/instances.csv, which the aggregate stage needs to
+#   emit summary_by_regime.csv (RF level x RS quartile -- the main line reports
+#   per regime, pooled means hide the tight/loose difference).  Disable with
+#   RUN_STATS=0; the aggregate stage then drops --params and only writes
+#   merged_detail.csv + summary_by_suite.csv.
+#
 # Step 3 (PPO) runs separately via train_a800.sh / train_cpu.sh.  After a
 # trained run exists, re-run this script with WITH_PPO=1 to fold the
 # ppo_makespan column into the same merged table.
@@ -33,6 +40,7 @@ SEED="${SEED:-17}"
 # generalization references, not part of the main test)
 SUITES="${SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
+RUN_STATS="${RUN_STATS:-1}"
 RUN_RULES="${RUN_RULES:-1}"
 RUN_GA="${RUN_GA:-1}"
 # GPHH disabled by default: GP evolution is slow (train 40 trees x N generations
@@ -53,6 +61,7 @@ GA_POPULATION="${GA_POPULATION:-50}"
 GA_GENERATIONS="${GA_GENERATIONS:-200}"
 GPHH_TRAIN_INSTANCES="${GPHH_TRAIN_INSTANCES:-40}"
 
+OUT_STATS="${OUT_STATS:-outputs/instance_stats}"
 OUT_RULES="${OUT_RULES:-outputs/rules_psplib/makespan_summary.csv}"
 OUT_GA="${OUT_GA:-outputs/ga_psplib/ga.csv}"
 OUT_GPHH_DIR="${OUT_GPHH_DIR:-outputs/gphh_psplib/v1}"
@@ -84,6 +93,16 @@ stage_ready() {
 
 echo "== step 2/4: test-suite baselines (seed ${SEED}, suites ${SUITES}) =="
 
+# ---------------- stage 0: instance diagnostics (feeds --params) -------------
+if [[ "${RUN_STATS}" == "1" ]] && stage_ready "instance_stats" "${OUT_STATS}/instances.csv"; then
+    echo "[run ] instance_stats -> ${OUT_STATS}/instances.csv"
+    "${PYTHON}" -m scripts.instance_stats \
+        --data-root "${DATA_ROOT}" \
+        --splits "${SPLITS_PATH}" \
+        --workers "${RULES_WORKERS}" \
+        --output-dir "${OUT_STATS}" 2>&1 | tee "${LOG_DIR}/stats_${RUN_STAMP}.log"
+fi
+
 # ---------------- stage 1: priority rules (fast) ----------------
 if [[ "${RUN_RULES}" == "1" ]] && stage_ready "rules" "${OUT_RULES}"; then
     echo "[run ] rules -> ${OUT_RULES}"
@@ -110,7 +129,7 @@ if [[ "${RUN_GA}" == "1" ]] && stage_ready "ga" "${OUT_GA}"; then
         --output-csv "${OUT_GA}" 2>&1 | tee "${LOG_DIR}/ga_${RUN_STAMP}.log"
 fi
 
-# ---------------- stage 3: GPHH (train on rg30_train, eval on test) ----------
+# ---------------- stage 3: GPHH (train on the protocol's train split) --------
 if [[ "${RUN_GPHH}" == "1" ]]; then
     if stage_ready "gphh" "${OUT_GPHH_DIR}/eval_summary.csv"; then
         echo "[run ] gphh -> ${OUT_GPHH_DIR}"
@@ -147,16 +166,27 @@ if [[ "${RUN_AGGREGATE}" == "1" ]]; then
     else
         echo "[run ] aggregate (rules+ga+gphh, no PPO yet) -> ${OUT_AGG}"
     fi
+    AGG_PARAMS_ARGS=()
+    if [[ -f "${OUT_STATS}/instances.csv" ]]; then
+        AGG_PARAMS_ARGS=(--params "${OUT_STATS}/instances.csv")
+    else
+        echo "[warn] instance_stats output missing -> summary_by_regime.csv will be skipped"
+        echo "       (stage 0 writes it; enable with RUN_STATS=1 and rerun)"
+    fi
     "${PYTHON}" -m scripts.aggregate_results \
         --rules "${OUT_RULES}" \
         --ga "${OUT_GA}" \
         --bks "${BKS_JSON}" \
         --out-dir "${OUT_AGG}" \
         ${AGG_GPHH_ARGS[@]+"${AGG_GPHH_ARGS[@]}"} \
-        ${AGG_PPO_ARGS[@]+"${AGG_PPO_ARGS[@]}"} 2>&1 | tee "${LOG_DIR}/aggregate_${RUN_STAMP}.log"
+        ${AGG_PPO_ARGS[@]+"${AGG_PPO_ARGS[@]}"} \
+        ${AGG_PARAMS_ARGS[@]+"${AGG_PARAMS_ARGS[@]}"} 2>&1 | tee "${LOG_DIR}/aggregate_${RUN_STAMP}.log"
 
     echo "== done =="
     echo "merged table : ${OUT_AGG}/merged_detail.csv"
     echo "suite summary: ${OUT_AGG}/summary_by_suite.csv"
+    if [[ -f "${OUT_AGG}/summary_by_regime.csv" ]]; then
+        echo "regime table : ${OUT_AGG}/summary_by_regime.csv (suite x RF x RS quartile)"
+    fi
     echo "re-run with WITH_PPO=1 after PPO training to add the ppo_makespan column"
 fi

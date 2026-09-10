@@ -139,9 +139,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ref-rules", type=Path,
-        default=Path("outputs/rules_rg30/makespan_summary.csv"),
-        help="baselines.py CSV covering rg30 (serial_* columns); reference rule "
-             "makespans for validation-based model selection",
+        default=Path("outputs/rules_psp_grid/makespan_summary.csv"),
+        help="baselines.py CSV covering the training pool (serial_* columns); "
+             "reference rule makespans for validation-based model selection",
     )
     parser.add_argument(
         "--ref-rule", default="serial_LST",
@@ -209,9 +209,10 @@ def load_reference_rules(path: Path, column: str) -> dict[str, int]:
     """Map unique instance ids -> reference-rule makespan from a baselines CSV."""
     if not path.is_file():
         raise FileNotFoundError(
-            f"--ref-rules not found: {path}; run baselines on rg30 first, e.g.\n"
-            "  python -m scripts.baselines --data-root data --suites rg30 "
-            "--instance-workers 8 --output-csv outputs/rules_rg30/makespan_summary.csv"
+            f"--ref-rules not found: {path}; build it from the training pool "
+            "first, e.g.\n"
+            "  python -m scripts.baselines --data-root data --instance-workers 8 "
+            "--output-csv outputs/rules_psp_grid/makespan_summary.csv"
         )
     with path.open(newline="") as fh:
         reader = csv.DictReader(fh)

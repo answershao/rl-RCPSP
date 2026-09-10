@@ -39,6 +39,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.common import (
+    EVALUATION_SUITES,
     SUITE_SPECS,
     jobs_for_suites,
     map_jobs,
@@ -73,8 +74,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-instances", type=int, default=40)
     parser.add_argument(
         "--eval-suites",
-        default=",".join(SUITE_SPECS),
-        help="comma-separated suite ids evaluated with the best rule",
+        default=",".join(EVALUATION_SUITES),
+        help="comma-separated suite ids evaluated with the best rule; "
+        "defaults to every benchmark suite (training pools are never included "
+        "-- the rule is fitted on the train split)",
     )
     parser.add_argument("--eval-workers", type=int, default=1)
     parser.add_argument("--max-instances", type=int, default=0)

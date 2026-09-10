@@ -1,11 +1,14 @@
 """Shared runner machinery for the instance-matrix baseline scripts.
 
-Single source of truth for the four-suite RCPSP protocol:
+Single source of truth for the RCPSP suite matrix (benchmark suites *and*
+training pools):
 
 * ``SUITE_SPECS`` -- suite id -> (data-root-relative directory, glob, role).
   ``scripts/generate_pool.py`` (protocol manifest) and the instance runners
   (``scripts/baselines.py``, ``scripts/run_ga.py``, ``scripts/run_gphh.py``)
   all consume this table, so directory layout / suite ids / roles cannot drift.
+* ``EVALUATION_SUITES`` / ``DEFAULT_SUITES`` -- which suites may be reported as
+  benchmark results, and what the runners default to.  See the comments below.
 * instance discovery (``find_instances`` with numeric-aware ordering), plus
   path helpers used when emitting data-root-relative ``file`` keys.
 * the spawn-safe evaluation driver ``map_jobs`` (serial fallback for
@@ -37,8 +40,27 @@ SUITE_SPECS: dict[str, tuple[str, str, str]] = {
     "rg30": ("oras/RCPSP/RG30", "**/*.rcp", "historical-training-pool"),
     "rg300": ("oras/RCPSP/RG300", "*.rcp", "final-evaluation"),
     "patterson": ("oras/RCPSP/Patterson", "*.rcp", "final-evaluation"),
+    # The active training pool is registered here for one reason: S5's
+    # checkpoint selection needs a reference-rule CSV covering the `validation`
+    # split, and `scripts.baselines` is the only producer of that CSV -- it can
+    # only find instances through this table.  See docs/EXECUTION_FLOW.md S3.
+    "psp_grid": ("generated/psp_grid_bal", "**/*.rcp", "training-pool"),
 }
-DEFAULT_SUITES = ",".join(SUITE_SPECS)
+
+# Suites that may be reported as benchmark results.  Every training pool is
+# excluded: scoring a method on the data it was fitted to is not a benchmark.
+# (rg30 is a retired pool, psp_grid is the active one.)
+EVALUATION_SUITES = tuple(
+    suite for suite, spec in SUITE_SPECS.items() if spec[2] == "final-evaluation"
+)
+
+# Default `--suites` for the baseline runners.  Pointing it at the training pool
+# means the command S5 depends on needs no extra flags:
+#   python -m scripts.baselines --instance-workers 8 \
+#     --output-csv outputs/rules_psp_grid/makespan_summary.csv
+# Benchmark runs state their suites explicitly, e.g.
+#   --suites psplib_j30,psplib_j60,psplib_j90,psplib_j120
+DEFAULT_SUITES = "psp_grid"
 
 _NUMBER_TOKEN = re.compile(r"\d+")
 
@@ -86,7 +108,9 @@ def add_instance_args(parser: argparse.ArgumentParser, *, workers_flag: str) -> 
     parser.add_argument(
         "--suites",
         default=DEFAULT_SUITES,
-        help="comma-separated suite ids; default runs all seven",
+        help="comma-separated suite ids; defaults to psp_grid (the active "
+        "training pool, used to build the reference-rule CSV). Pass the "
+        "evaluation suites explicitly for benchmark runs.",
     )
     parser.add_argument(
         "--max-instances",
