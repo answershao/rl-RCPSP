@@ -25,7 +25,8 @@
 - **解析唯一入口**：`src/data/parsers.py`（.sm/.rcp → RCPSPInstance）→ `src/data/adapter.py`：
   `load_core_instance(path, name=None)`（→ core `Instance`）与 `to_core_instance`。
 - 实例唯一标识 = **相对路径去扩展名**（`instance_id`，RG30 跨 Set 有同名 stem，不可只用文件名）。
-- 全局模型 cap：**302 活动 / 4 资源 / MAX_SUCCESSORS=96**（单模型零样本覆盖 j30→RG300）。
+- 全局模型 cap：**302 活动 / 4 资源 / MAX_SUCCESSORS=96 + MAX_PREDECESSORS=96**（单模型零样本覆盖 j30→RG300）。
+  GIN 消息按邻居数取均值（非求和），否则 RG300 稠密图会让嵌入幅度爆炸；入/出度以显式特征喂入。
 - BKS 缓存：`data/bks/bks_psplib.json`（`scripts/extract_bks.py` 从 PSPLIB sheet 的 160 个 UB 类列取
   min 合成）。⚠️ 勿单独引用 `UB-LAA/LAB/LSA/LSB/LPA/LPB-*` 列（恒等于工期总和的平凡兜底 UB）。
 
@@ -70,7 +71,7 @@
 - 一条命令全量回归（含 4430 全语料解析、SB3 短训）：
   ```bash
   source /Users/fn/miniconda3/etc/profile.d/conda.sh && conda activate rl
-  python -m pytest -q          # 35 passed（≈40s 快测 + ≈4min 全语料 slow）
+  python -m pytest -q          # 44 passed（≈40s 快测 + ≈4min 全语料 slow）
   python -m pytest -q -W error # 无警告级失败（R3：第三方良性告警已在源点精准抑制）
   python -m pytest -m slow     # 仅慢项（全语料解析）
   ```
@@ -99,9 +100,9 @@ src/  data/  parsers.py（解析）· adapter.py（适配）· instances.py（�
       training/ ppo.py features.py environments.py callbacks.py
       visualization/ aon.py gantt.py
 scripts/  common（套件表/发现/进程池/CSV 公共件）· make_splits baselines run_ga
-          run_gphh train_ppo search_ppo compare_ppo_results extract_bks
+          run_gphh train_ppo search_ppo bench_ppo compare_ppo_results extract_bks
           aggregate_results visualize_instance
-tests/    12 个 pytest 文件（35 用例）
+tests/    14 个 pytest 文件（44 用例）
 ```
 
 > R1 已收敛：目录 `src/data`（解析/适配/协议）+ `src/envs`；`ActivityId` 由
