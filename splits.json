@@ -1,5 +1,5 @@
 {
- "protocol": "Generated training pool (psp-grid, replicates 8/4/2/1 by size, validation fraction 0.2) covering the PSPLIB nominal factor design; PSPLIB j30-j120, RG300 and Patterson are final-evaluation only and must never appear in training or in the training-period validation split. Previous RG30-only protocol is preserved as splits_rg30.json for the ablation.",
+ "protocol": "Generated training pool (psp-grid, replicates 8/4/2/1 by size, validation fraction 0.2) covering the PSPLIB nominal factor design; PSPLIB j30-j120, RG300 and Patterson are final-evaluation only and must never appear in training or in the training-period validation split.",
  "generator": "src/data/generator.py",
  "mode": "psp-grid",
  "seed": 20260910,

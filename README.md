@@ -38,14 +38,14 @@ scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一�
                  aggregate_results visualize_instance
                  instance_stats（套件参数/覆盖度诊断）· generate_pool（生成训练池）
 tests/           15 个 pytest 文件（61 用例）
-splits.json      唯一切分协议（生成池 psp_grid_bal；旧 RG30 协议在 splits_rg30.json）
+splits.json      唯一切分协议（生成池 psp_grid_bal）
 ```
 
 ## 复现入口速查
 
 | 步骤 | 命令 | 产物 |
 |---|---|---|
-| （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output splits_rg30.json` | RG30-only 协议（ablation 用） |
+| （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output <file>` | RG30-only 协议（历史口径，须显式指定输出文件名） |
 | 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/CP + 与训练池的特征级交叠） |
 | 生成候选训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json` | 生成 `.rcp` + `read_protocol` 兼容 manifest（可直接喂 `--splits`）；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
@@ -82,8 +82,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal；旧 RG30 协议�
   （1148，PSPLIB 因子网格生成实例，按 n=30/60/90/120 以 8/4/2/1 配平）、
   训练期验证=rg30_validation（68，按规模 20% 格子抽取）、
   test=PSPLIB（主测试集，训练期不可见）；rg300/patterson 为可选泛化/补充参考，不进主对比表。
-  旧 RG30-only 协议保留在 `splits_rg30.json`（seed 20260909，`scripts/make_splits.py` 可重建），
-  供"RG30 训练 vs 生成池训练"ablation 对照。
+  旧 RG30-only 协议已退役（`scripts/make_splits.py` 可按历史口径重建，数据仍在 `data/oras`）。
 - **参数覆盖度是可测量的，不是口号**：PSPLIB j30-j120 是 4 RF × (4|5) RS × 3 NC 的因子设计，
   旧 RG30 训练池在参数空间里是一个点（RF 恒 0.75、RS∈[0.003,0.046]、n 恒 30），
   j30-j120 的 RF×RS 联合覆盖只有 0–15%。用 `scripts/instance_stats` 量化、
