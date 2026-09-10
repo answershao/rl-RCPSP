@@ -4,7 +4,8 @@
 逐活动学习调度策略，与**优先规则**（串行/并行 SGS × FIFO/SPT/…/LST/…/WCS）、**GA**（随机键）、
 **GPHH**（表达式树超启发式）基线对比。数据为 4430 个公开单项目算例，PSPLIB 主基准以 BKS 精确 gap 度量。
 
-> 数据划分协议、方法口径、端到端流程与重构路线图：见 **[docs/EXECUTION_FLOW.md](docs/EXECUTION_FLOW.md)**。
+> 数据划分协议、方法口径、端到端流程与重构路线图：见 **[docs/EXECUTION_FLOW.md](docs/EXECUTION_FLOW.md)**；
+> 逐步操作手册（S0–S6 命令 / 通过判据 / 排错）：见 **[docs/MAINLINE.md](docs/MAINLINE.md)**。
 > 本文档只给「怎么跑、产物放哪」的速查。
 
 ## 环境与测试
@@ -37,7 +38,7 @@ scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一�
                  bench_ppo（训练吞吐扫描）compare_ppo_results extract_bks
                  aggregate_results visualize_instance
                  instance_stats（套件参数/覆盖度诊断）· generate_pool（生成训练池）
-tests/           15 个 pytest 文件（61 用例）
+tests/           14 个 test_*.py（65 用例）+ conftest
 splits.json      唯一切分协议（生成池 psp_grid_bal）
 ```
 
@@ -46,7 +47,8 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | 步骤 | 命令 | 产物 |
 |---|---|---|
 | 生成协议/训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json`（生成后把 manifest 拷为 `splits.json` 即当前协议） | 生成 `.rcp` + `read_protocol` 兼容 manifest，可直接喂 `--splits`；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
-| 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/OS/CP + 与训练池的参数与特征级覆盖） |
+| 协议诊断（S2，regime 参数源） | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/OS/CP + 与训练池的参数与特征级覆盖；`instances.csv` 是汇总阶段 `--params` 的输入） |
+| 训练池参照规则（S3） | `python -m scripts.baselines --data-root data --instance-workers 8 --output-csv outputs/rules_psp_grid/makespan_summary.csv` | rules CSV，覆盖 train+validation 全部 1216 个生成实例；**PPO 训练的 `--ref-rules` 默认读它，缺了训练直接报错** |
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |
@@ -58,7 +60,12 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
 | **一键步骤 2+4** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→GPHH→aggregate 合并出表；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
 
-`--suites` 合法 id：`psplib_j30/j60/j90/j120`、`rg30`、`rg300`、`patterson`（`scripts/common.py::SUITE_SPECS`）。
+`--suites` 合法 id：`psplib_j30/j60/j90/j120`、`rg30`、`rg300`、`patterson`、`psp_grid`（= 现役训练池，`scripts/common.py::SUITE_SPECS`）。
+**默认值就是 `psp_grid`**（`baselines`/`run_ga` 不带 `--suites` 时跑训练池，供 S3 用）；跑 benchmark 请显式指定，如 `--suites psplib_j30,psplib_j60,psplib_j90,psplib_j120`。`run_gphh --eval-suites` 的默认值则是全部评测套件（`EVALUATION_SUITES`，不含任何训练池）。
+
+> 上表按**依赖顺序**排列（S0 自检 → S1 生成协议 → S2 诊断 → S3 训练池参照规则 → S4 基线 → S5 PPO → S6 汇总）。
+> **逐步操作手册（含每步通过判据与排错表）见 [docs/MAINLINE.md](docs/MAINLINE.md)**；
+> 阶段定义与一键封装范围见 [docs/EXECUTION_FLOW.md](docs/EXECUTION_FLOW.md) §2。
 
 ## 输出目录规范
 
@@ -73,7 +80,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | 可视化 | `outputs/visualizations/<instance_stem>/` |
 | 运行日志 | `logs/ppo/*.log`（train/eval/search 均 nohup 后台写此） |
 
-历史遗留的 `outputs/*_smoke` 为临时冒烟产物，可随时清理。
+冒烟/调试产物（`outputs/*_smoke`、`outputs/experiments/ppo/<debug_run>/`，含数百 MB 的失效模型）为一次性产物，不保留，可随时清理。
 
 ## 关键口径（与 docs/EXECUTION_FLOW.md §1 同源）
 
