@@ -386,9 +386,8 @@ def main() -> None:
 
     manifest = {
         "protocol": (
-            "generated training pool; 'rg30_train' / 'rg30_validation' are the "
-            "split keys expected by src.data.instances.read_protocol, not a "
-            "statement about the RG30 corpus"
+            "generated training pool; split keys 'train' / 'validation' are read "
+            "by src.data.instances.read_protocol"
         ),
         "generator": "src/data/generator.py",
         "mode": args.mode,
@@ -397,8 +396,8 @@ def main() -> None:
         "validation_fraction": args.validation_fraction,
         "widen": bool(args.widen),
         "splits": {
-            "rg30_train": sorted(train_entries),
-            "rg30_validation": sorted(validation_entries),
+            "train": sorted(train_entries),
+            "validation": sorted(validation_entries),
         },
         "evaluation": json.loads(args.splits.read_text()).get("evaluation", {}),
         "counts": {

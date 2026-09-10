@@ -2,7 +2,7 @@
 
 Motivation
 ----------
-The PPO policy is trained only on RG30 but evaluated on PSPLIB j30-j120, RG300
+The PPO policy is trained on the generated pool but evaluated on PSPLIB j30-j120, RG300
 and Patterson.  Whether that transfer can work at all depends on how well the
 training pool covers the *input distribution the policy actually consumes* --
 not on raw instance counts.  This script measures that, so any change to the
@@ -14,10 +14,11 @@ It reports three layers:
 1. **Instance parameters** -- n, K, RF (resource factor), RS (resource
    strength), NC (network complexity), CP, resource lower bound.
 2. **Policy input features** -- the normalised per-node tensors built by
-   ``src.envs.observation``: ``duration / horizon``, ``downstream / horizon``,
-   ``demand / capacity``, ``degree / MAX_*``.  These are what the GIN sees.
+   ``src.envs.observation``: ``duration / max(duration)``,
+   ``downstream / max(downstream)``, ``demand / capacity``, ``degree / MAX_*``.
+   These are what the GIN sees.
 3. **Coverage** -- for each evaluation suite, the fraction of instances whose
-   (RF, RS) fall inside the RG30 training envelope, plus a histogram-intersection
+   (RF, RS) fall inside the training-pool envelope, plus a histogram-intersection
    overlap of every policy input feature against the training pool.
 
 Usage:
@@ -46,8 +47,8 @@ MAX_SUCCESSORS = 96
 MAX_PREDECESSORS = 96
 
 FEATURE_COLUMNS = (
-    "dur_over_horizon",
-    "downstream_over_horizon",
+    "dur_over_max_duration",
+    "downstream_over_max_downstream",
     "demand_over_capacity",
     "outdeg_norm",
     "indeg_norm",
@@ -153,6 +154,7 @@ def instance_parameters(inst) -> dict:
         "RF": rf,
         "RS": rs,
         "NC": nc,
+        "OS": float(os_),
         "CP": cp,
         "sumdur": float(dur_r.sum()),
         "res_lb": float(res_lb),
@@ -174,7 +176,9 @@ def instance_descriptors(path: Path, group: str, rel: str) -> dict:
     demands = np.array([inst.activities[i].demand for i in ids], dtype=float)
     capacities = np.maximum(np.asarray(inst.capacities, dtype=float), 1.0)
     real = durations > 0
-    horizon = max(float(durations.sum()), 1.0)
+    # Mirror src/envs/observation.py: static duration features are normalised
+    # by per-instance maxima (size invariant), not by the duration sum.
+    duration_scale = max(float(durations[real].max()) if real.any() else 1.0, 1.0)
 
     order: list[int] = []
     indeg = {i: len(inst.predecessors.get(i, ())) for i in ids}
@@ -196,9 +200,11 @@ def instance_descriptors(path: Path, group: str, rel: str) -> dict:
             default=0.0,
         )
 
+    downstream_scale = max(float(downstream.max()), 1.0)
+
     row["_nodes"] = {
-        "dur_over_horizon": durations[real] / horizon,
-        "downstream_over_horizon": downstream[real] / horizon,
+        "dur_over_max_duration": durations[real] / duration_scale,
+        "downstream_over_max_downstream": downstream[real] / downstream_scale,
         "demand_over_capacity": (demands[real] / capacities).ravel(),
         "outdeg_norm": np.array(
             [len(inst.activities[i].successors) for i in ids], dtype=float
@@ -221,8 +227,8 @@ def collect_jobs(
     ``--data-root``, which is how a generated candidate pool gets measured with
     the same code path as a benchmark suite.
     """
-    jobs = [(data_root / rel, "rg30_train", rel) for rel in protocol["train"]]
-    jobs += [(data_root / rel, "rg30_validation", rel) for rel in protocol["validation"]]
+    jobs = [(data_root / rel, "train", rel) for rel in protocol["train"]]
+    jobs += [(data_root / rel, "validation", rel) for rel in protocol["validation"]]
     for suite, rels in protocol["evaluation"].items():
         jobs += [(data_root / rel, f"eval_{suite}", rel) for rel in rels]
     for group, pattern in extra_pools:
@@ -269,7 +275,7 @@ def overlap(a: np.ndarray, b: np.ndarray, bins: int = 40) -> float:
 
 
 def coverage_rows(rows: list[dict], rf_tol: float) -> list[dict]:
-    train = [r for r in rows if r["group"] == "rg30_train"]
+    train = [r for r in rows if r["group"] == "train"]
     rf_lo = min(r["RF"] for r in train) - rf_tol
     rf_hi = max(r["RF"] for r in train) + rf_tol
     rs_lo = min(r["RS"] for r in train)

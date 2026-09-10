@@ -1,7 +1,7 @@
 """Protocol-driven single-project instance loading for the RL training stack.
 
 Every training/evaluation entry point must consume ``splits.json`` (produced
-by ``scripts/make_splits.py``) and parse instances through the unified
+by ``scripts/generate_pool.py``) and parse instances through the unified
 ``src.data.parsers`` parser + ``src.data.adapter`` bridge, so PPO shares exactly
 the same data representation (and the same serial SGS decoder) as the
 priority-rule / GA / GPHH baselines.
@@ -46,17 +46,23 @@ def read_protocol(splits_path: str | Path) -> dict:
 
     Returns ``{"train": [...], "validation": [...], "evaluation": {suite: [...]}}``
     where every path is data-root-relative and posix-normalised.
+
+    Split keys are ``train`` / ``validation``; the historical key names
+    ``rg30_train`` / ``rg30_validation`` (when RG30 was the training pool) are
+    still accepted so older manifests keep loading.
     """
     doc = json.loads(Path(splits_path).read_text())
     splits = doc["splits"]
     evaluation = doc["evaluation"]
-    if not splits.get("rg30_train") or not splits.get("rg30_validation"):
-        raise ValueError(f"{splits_path}: missing rg30_train / rg30_validation splits")
+    train = splits.get("train") or splits.get("rg30_train")
+    validation = splits.get("validation") or splits.get("rg30_validation")
+    if not train or not validation:
+        raise ValueError(f"{splits_path}: missing train / validation splits")
     if not evaluation:
         raise ValueError(f"{splits_path}: evaluation groups are empty")
     norm = lambda paths: [Path(p).as_posix() for p in paths]
     return {
-        "train": norm(splits["rg30_train"]),
-        "validation": norm(splits["rg30_validation"]),
+        "train": norm(train),
+        "validation": norm(validation),
         "evaluation": {suite: norm(paths) for suite, paths in evaluation.items()},
     }

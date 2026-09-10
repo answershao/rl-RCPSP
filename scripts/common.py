@@ -3,7 +3,7 @@
 Single source of truth for the four-suite RCPSP protocol:
 
 * ``SUITE_SPECS`` -- suite id -> (data-root-relative directory, glob, role).
-  ``scripts/make_splits.py`` (protocol manifest) and the instance runners
+  ``scripts/generate_pool.py`` (protocol manifest) and the instance runners
   (``scripts/baselines.py``, ``scripts/run_ga.py``, ``scripts/run_gphh.py``)
   all consume this table, so directory layout / suite ids / roles cannot drift.
 * instance discovery (``find_instances`` with numeric-aware ordering), plus
@@ -34,7 +34,7 @@ SUITE_SPECS: dict[str, tuple[str, str, str]] = {
     "psplib_j60": ("psplib/j60", "*.sm", "final-evaluation"),
     "psplib_j90": ("psplib/j90", "*.sm", "final-evaluation"),
     "psplib_j120": ("psplib/j120", "*.sm", "final-evaluation"),
-    "rg30": ("oras/RCPSP/RG30", "**/*.rcp", "training-pool"),
+    "rg30": ("oras/RCPSP/RG30", "**/*.rcp", "historical-training-pool"),
     "rg300": ("oras/RCPSP/RG300", "*.rcp", "final-evaluation"),
     "patterson": ("oras/RCPSP/Patterson", "*.rcp", "final-evaluation"),
 }

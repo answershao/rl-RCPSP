@@ -2,22 +2,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "RCPSP: Generate splits.json protocol",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "scripts.make_splits",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--data-root",
-                "data",
-                "--seed",
-                "20260909",
-                "--output",
-                "splits.json"
-            ]
-        },
-        {
             "name": "RCPSP: Visualize one instance (j30)",
             "type": "debugpy",
             "request": "launch",

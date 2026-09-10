@@ -12,7 +12,7 @@
  "validation_fraction": 0.2,
  "widen": true,
  "splits": {
-  "rg30_train": [
+  "train": [
    "generated/psp_grid_bal/n120/c0241_r00.rcp",
    "generated/psp_grid_bal/n120/c0242_r00.rcp",
    "generated/psp_grid_bal/n120/c0243_r00.rcp",
@@ -1162,7 +1162,7 @@
    "generated/psp_grid_bal/n90/c0239_r00.rcp",
    "generated/psp_grid_bal/n90/c0239_r01.rcp"
   ],
-  "rg30_validation": [
+  "validation": [
    "generated/psp_grid_bal/n120/c0240_r00.rcp",
    "generated/psp_grid_bal/n120/c0245_r00.rcp",
    "generated/psp_grid_bal/n120/c0250_r00.rcp",
