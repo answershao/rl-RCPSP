@@ -33,7 +33,7 @@ src/
   visualization/ aon.py · gantt.py
   data/generator.py  ProGen 风格生成器（可控 n/RF/RS/NC）
 scripts/         common.py（套件表/发现/进程池/CSV 公共件，单一事实源）
-                 make_splits baselines run_ga run_gphh train_ppo search_ppo
+                 baselines run_ga run_gphh train_ppo search_ppo
                  bench_ppo（训练吞吐扫描）compare_ppo_results extract_bks
                  aggregate_results visualize_instance
                  instance_stats（套件参数/覆盖度诊断）· generate_pool（生成训练池）
@@ -45,9 +45,8 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 
 | 步骤 | 命令 | 产物 |
 |---|---|---|
-| （重新）生成协议 | `python -m scripts.make_splits --data-root data --seed 20260909 --val-fraction 0.1 --output <file>` | RG30-only 协议（历史口径，须显式指定输出文件名） |
-| 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/CP + 与训练池的特征级交叠） |
-| 生成候选训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json` | 生成 `.rcp` + `read_protocol` 兼容 manifest（可直接喂 `--splits`）；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
+| 生成协议/训练池 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json`（生成后把 manifest 拷为 `splits.json` 即当前协议） | 生成 `.rcp` + `read_protocol` 兼容 manifest，可直接喂 `--splits`；`--replicates` 支持单值或按 n=30/60/90/120 的列表（列表配平决策状态数，单实例成本 ≈n²） |
+| 仓库结构诊断 | `python -m scripts.instance_stats --data-root data --workers 8` | `outputs/instance_stats/{instances,summary,coverage}.csv`（各套件 n/K/RF/RS/NC/OS/CP + 与训练池的参数与特征级覆盖） |
 | 规则基线 | `python -m scripts.baselines --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/rules_j30/makespan_summary.csv` | rules CSV（30 列，25 个 makespan 方法列） |
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |
@@ -55,7 +54,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | PPO 训练吞吐扫描 | `python -m scripts.bench_ppo --caps 32 302 --threads 8 16 20 --batch-sizes 512 1024 4096` | 终端表格 / 可选 `--output-csv`（rollout·update·total fps） |
 | PPO 评估已有模型 | `bash eval_cpu.sh`（MODEL_DIR 指向 run 目录，评估 splits.json 全部 evaluation 组） | 同上目录追加 `ppo_eval_summary.csv` |
 | 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
-| 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv`（gap vs BKS、below-BKS 告警） |
+| 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --params outputs/instance_stats/instances.csv --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv` + `summary_by_regime.csv`（gap vs BKS、below-BKS 告警、RF×RS 分档） |
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
 | **一键步骤 2+4** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→GPHH→aggregate 合并出表；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
 
@@ -78,17 +77,25 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 
 ## 关键口径（与 docs/EXECUTION_FLOW.md §1 同源）
 
-- `splits.json` 是**唯一切分清单**（2026-09-10 起为生成池协议）：训练=rg30_train
+- `splits.json` 是**唯一切分清单**（2026-09-10 起为生成池协议）：训练=train
   （1148，PSPLIB 因子网格生成实例，按 n=30/60/90/120 以 8/4/2/1 配平）、
-  训练期验证=rg30_validation（68，按规模 20% 格子抽取）、
+  训练期验证=validation（68，按规模 20% 格子抽取）、
   test=PSPLIB（主测试集，训练期不可见）；rg300/patterson 为可选泛化/补充参考，不进主对比表。
-  旧 RG30-only 协议已退役（`scripts/make_splits.py` 可按历史口径重建，数据仍在 `data/oras`）。
+  旧 RG30-only 协议已退役（`data/oras` 的 RG30 数据保留，仅供 `--suites rg30` 基线）。
 - **参数覆盖度是可测量的，不是口号**：PSPLIB j30-j120 是 4 RF × (4|5) RS × 3 NC 的因子设计，
   旧 RG30 训练池在参数空间里是一个点（RF 恒 0.75、RS∈[0.003,0.046]、n 恒 30），
   j30-j120 的 RF×RS 联合覆盖只有 0–15%。用 `scripts/instance_stats` 量化、
   `scripts/generate_pool` 在同一网格上生成新实例补齐——现役训练池
-  `data/generated/psp_grid_bal` 的 RF×RS 联合覆盖升到 93–100%，
-  demand/capacity 特征交叠从 ~0.4 升到 0.84–0.93。
+  `data/generated/psp_grid_bal` 的 RF×RS 联合覆盖升到 92–100%。
+- **归一化口径（2026-09-10 修正）**：静态时长特征用 **per-instance 最大值**作分母
+  （`duration/max(duration)`、`downstream/max(downstream)`），不再除以 duration 总和——
+  后者 ∝1/n，曾让 j120 的 dur 特征交叠掉到 0.22。修正后 j30-j120 的两个时长特征交叠
+  0.97–0.99、demand/capacity 0.85–0.96；跨规模分布齐平，无 n 相关漂移。
+  动态时间特征（ready/start/finish 等）仍除以 horizon（安全上界），分子分母同 ∝n，无此问题。
+  ⚠️ 特征语义已变，2026-09-10 前的 checkpoint 一律不可用。
+- **评估按 regime 分档**：`scripts/aggregate_results.py --params outputs/instance_stats/instances.csv`
+  额外产出 `summary_by_regime.csv`（suite × RF 档 × RS 四分位 × 方法）。
+  池化均值会掩盖紧/松档差异——j30 上 GA 的 gap 从最紧四分位 1.91% 到最松 0.03%（64 倍）。
 - 解析唯一入口 `src.data.adapter.load_core_instance`；实例唯一标识 = 数据根相对路径去扩展名。
 - 模型全局 cap：302 活动 / 4 资源 / `MAX_SUCCESSORS=96` + `MAX_PREDECESSORS=96`
   （全语料实测上界 89 / 91，共用 96 余量；j30→RG300 零样本单模型）。

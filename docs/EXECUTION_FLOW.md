@@ -20,9 +20,9 @@
 
 固定约定：
 
-- **`splits.json` 是唯一切分清单**（2026-09-10 起 = 生成池协议）：`rg30_train`(1148) /
-  `rg30_validation`(68) / `evaluation.{psplib_j30,j60,j90,j120,rg300,patterson}`。所有入口只读它取数，
-  禁止自行扫描目录当切分。
+- **`splits.json` 是唯一切分清单**（2026-09-10 起 = 生成池协议）：`train`(1148) /
+  `validation`(68) / `evaluation.{psplib_j30,j60,j90,j120,rg300,patterson}`。所有入口只读它取数，
+  禁止自行扫描目录当切分。（`read_protocol` 仍兼容旧键名 `rg30_train`/`rg30_validation`。）
 - **解析唯一入口**：`src/data/parsers.py`（.sm/.rcp → RCPSPInstance）→ `src/data/adapter.py`：
   `load_core_instance(path, name=None)`（→ core `Instance`）与 `to_core_instance`。
 - 实例唯一标识 = **相对路径去扩展名**（`instance_id`，RG30 跨 Set 有同名 stem，不可只用文件名）。
@@ -38,9 +38,9 @@
       │
       ├─ scripts/baselines.py ───────────────▶ rules CSV（25 列 makespan：serial/parallel × 11 规则 + WCS）
       ├─ scripts/run_ga.py ──────────────────▶ ga CSV（ga_makespan，默认 50×200）
-      ├─ scripts/run_gphh.py ────────────────▶ best_rule.txt + eval_summary.csv（训练只读 rg30_train）
+      ├─ scripts/run_gphh.py ────────────────▶ best_rule.txt + eval_summary.csv（训练只读 train 分片）
       ├─ scripts/train_ppo.py ───────────────▶ outputs/experiments/ppo/<run>/ppo_eval_summary.csv
-      │     （训练=rg30_train 生成池；验证=rg30_validation 按 serial_LST gap 择优 checkpoint；
+      │     （训练=train 分片（生成池）；验证=validation 按 serial_LST gap 择优 checkpoint；
       │       final_model.zip = 训练结束恢复 best 验证权重后的落盘，即 best model）
       │        评估对象：主 test=PSPLIB 各规模；rg300/patterson 为可选泛化/补充参考
       │        shell：train_a800.sh / train_cpu.sh（训练+评估）、eval_cpu.sh（仅评估已有模型）
@@ -57,13 +57,12 @@
 
 | 入口 | 取数 | 关键参数 | 产物 |
 |---|---|---|---|
-| `python -m scripts.make_splits` | data/ 扫描 | `--seed --val-fraction --output` | RG30-only 协议（历史协议，如需复现须显式指定输出文件名） |
 | `python -m scripts.generate_pool` | PSPLIB + RCPLIB xlsx | `--mode/--replicates/--validation-fraction/--widen/--workers` | 生成池 `.rcp` + manifest（当前 `splits.json` 的来源） |
 | `python -m scripts.baselines` | `--data-root/--suites` | `--max-instances 0`=全量、`--instance-workers` | `makespan_summary.csv` |
 | `python -m scripts.run_ga` | 同 baselines | `--population 50 --generations 200 --seed` | `ga.csv` |
 | `python -m scripts.run_gphh` | `--splits`(训练) + eval-suites | `--train-instances/--population/--generations/--eval-workers` | `best_rule.txt`/`eval_summary.csv` |
 | `python -m scripts.train_ppo` | `--splits` | `--total-timesteps/--n-envs/--max-activities/--max-resources/--eval-suites/--output-dir` | `ppo_eval_summary.csv`、模型 |
-| `python -m scripts.aggregate_results` | 上述 CSV | `--rules/--ga/--gphh/--ppo/--bks/--out-dir` | `merged_detail.csv`+`summary_by_suite.csv` |
+| `python -m scripts.aggregate_results` | 上述 CSV | `--rules/--ga/--gphh/--ppo/--bks/--params/--out-dir` | `merged_detail.csv`+`summary_by_suite.csv`+`summary_by_regime.csv`（RF 档 × RS 四分位） |
 
 辅助：`scripts/extract_bks.py`、`scripts/visualize_instance.py`（.sm/.rcp → Gantt/AON）、
 `scripts/search_ppo.py`（跨 seed×采样评估）、`scripts/compare_ppo_results.py`（两轮 PPO 对比）。
@@ -101,10 +100,11 @@ src/  data/  parsers.py（解析）· adapter.py（适配）· instances.py（�
       envs/     rcpsp_env.py multi_instance.py observation.py sb3_env.py
       training/ ppo.py features.py environments.py callbacks.py
       visualization/ aon.py gantt.py
-scripts/  common（套件表/发现/进程池/CSV 公共件）· make_splits baselines run_ga
+scripts/  common（套件表/发现/进程池/CSV 公共件）· generate_pool psplib_design
+          instance_stats baselines run_ga
           run_gphh train_ppo search_ppo bench_ppo compare_ppo_results extract_bks
           aggregate_results visualize_instance
-tests/    14 个 pytest 文件（44 用例）
+tests/    14 个 pytest 文件（61 用例）
 ```
 
 > R1 已收敛：目录 `src/data`（解析/适配/协议）+ `src/envs`；`ActivityId` 由
@@ -122,6 +122,7 @@ tests/    14 个 pytest 文件（44 用例）
 | **R3 健壮性** ✅ | 类型标注（`src/py.typed`、parsers 字段/返回注解）；docstring（`evaluate_paths` 的 static-cache name 校验语义注释化：stem vs 协议 instance_id）；异常路径（非法规则/非法 scheme 的 ValueError 带可用集合；空清单/超界原有校验保留） | 全绿（35 passed）+ `python -m pytest -W error` 无警告级失败；SB3 env_checker 对 2D 观测的良性提示在测试源点按消息精准抑制；固定 j30 数值与 R1 基线一致 |
 | **R4 scripts 薄化** ✅ | 新增 `scripts/common.py`（SUITE_SPECS 含 role / natural_key / find_instances / relative_posix / resolve_suite_ids / map_jobs spawn 驱动 / write_csv / print_suite_means 单一事实源），baselines·run_ga·run_gphh·**make_splits** 四个脚本的三份 SUITE_SPECS + 三份 find_instances + 三个进程池循环/CSV 写出全部单点化 | `pytest -q` 全绿 + `-W error` 干净；baselines/run_ga/gphh 冒烟输出与改造前 **列名/列序一致、行值一致**（仅 ga_seconds 计时列除外）；`make_splits` 重新生成 splits.json 逐字节一致；spawn 多进程路径冒烟通过 |
 | **R5 收尾** ✅ | argparse 自省校验 shell×4 + launch.json×9 任务全部参数合法（零漂移）；补根 `README.md`（环境/测试/结构/复现命令/输出目录规范）；本流程文档随仓库同步 | 冒烟命令与 R0 结果数值一致 |
+| **R6 主线对齐** ✅ | ①`observation` 时长特征改 per-instance 最大值归一（消除 ∝1/n 伪影，j120 dur 交叠 0.22→0.99）；②协议键正名 `train`/`validation`（`read_protocol` 兼容旧键）；③退役 `scripts/make_splits.py`（协议由 `generate_pool` 接管）；④`aggregate_results --params` 增 `summary_by_regime.csv`（RF 档 × RS 四分位） | `pytest -W error` 61 passed；`instance_stats` 重算：j30-j120 时长特征交叠 0.97–0.99、RF×RS 联合覆盖 92–100%；regime 汇总复现 j30 GA gap 1.91%(紧)→0.03%(松) |
 
 贯穿原则：**任何重构步骤都以 `pytest -q` + 一个「基线数值对齐」冒烟（固定实例的 makespan/gap 不变）作为放行条件**；涉及命名/结构的改动独立小步提交，避免一次大爆炸。
 
