@@ -21,7 +21,7 @@ __MACOSX/
 .idea/
 *.swp
 *~
-# .vscode/ is intentionally tracked (launch.json defines the 9 RCPSP tasks);
+# .vscode/ is intentionally tracked (launch.json defines the 8 RCPSP tasks);
 # keep only personal bits out:
 .vscode/*.code-workspace
 
@@ -36,7 +36,8 @@ __MACOSX/
 # ---------- Generated experiment outputs (all re-runnable via scripts + README) ----------
 outputs/
 # Note: root-level protocol artifacts below ARE committed on purpose:
-#   splits.json   -- the single split manifest (seed 20260909, regen via scripts/make_splits.py)
+#   splits.json   -- the single split manifest (seed 20260909; regenerate with
+#                    scripts/generate_pool.py --manifest, see README)
 #   scripts/*.csv outputs are only produced under outputs/ and stay ignored.
 
 # ---------- Background training / run logs ----------
