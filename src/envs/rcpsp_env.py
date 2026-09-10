@@ -128,6 +128,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self._resource_work_by_activity = self._durations * self._demands.sum(axis=1)
         self._capacities = capacities
         self._capacity_limits = self._capacities - self._demands
+        self._capacity_scale = np.maximum(self._capacities.astype(np.float32), 1.0)
         self._capacity_total = int(np.sum(capacities))
         self._predecessor_counts = np.asarray(
             [len(self.instance.predecessors[activity_id]) for activity_id in self.activity_ids],
@@ -160,6 +161,14 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             (self.resource_count, RESOURCE_PROFILE_FEATURE_COUNT),
             dtype=np.float32,
         )
+        self._resource_profile_sums = np.zeros(
+            (self.resource_count, RESOURCE_PROFILE_BIN_COUNT), dtype=np.int64
+        )
+        self._resource_profile_ranges = tuple(
+            self._profile_range(bin_index)
+            for bin_index in range(RESOURCE_PROFILE_BIN_COUNT)
+        )
+        self._finish_times = np.full(self.activity_count, -1, dtype=np.int32)
         self._current_time = np.zeros(1, dtype=np.int32)
         self._dynamic_activity_features = np.zeros(
             (self.activity_count, DYNAMIC_ACTIVITY_FEATURE_COUNT), dtype=np.float32
@@ -170,6 +179,9 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
     ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         super().reset(seed=seed)
         self._state.reset(self._predecessor_counts)
+        self._resource_profile.fill(0.0)
+        self._resource_profile_sums.fill(0)
+        self._finish_times.fill(-1)
         observation = self._observation()
         return observation, {"eligible_mask": observation["eligible_mask"].copy()}
 
@@ -182,8 +194,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         if not self.action_space.contains(action):
             raise ValueError(f"action must be an integer in [0, {self.activity_count})")
         requested_index = int(action)
-        eligible_indices = np.flatnonzero(state.eligible_mask)
-        if not eligible_indices.size:
+        if not state.eligible_mask.any():
             raise RuntimeError("precedence graph is cyclic or has a missing predecessor")
         invalid_action = not state.eligible_mask[requested_index]
         if invalid_action:
@@ -212,13 +223,15 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             current_makespan=state.current_time,
         )
         state.resource_work += int(self._resource_work_by_activity[chosen_index])
+        self._finish_times[chosen_index] = finish
+        self._update_resource_profile(start, finish, self._demands[chosen_index])
         state.eligible_mask[chosen_index] = False
         for successor in self.instance.activities[chosen].successors:
             successor_index = self.activity_index[successor]
             state.remaining_predecessors[successor_index] -= 1
             if state.remaining_predecessors[successor_index] == 0:
                 state.eligible_mask[successor_index] = True
-        state.current_time = max(state.finishes.values(), default=0)
+        state.current_time = max(state.current_time, finish)
         makespan_penalty = -float(state.current_time - old_time) / max(self.horizon, 1)
         reward = makespan_penalty
         state.terminated = len(state.starts) == self.activity_count
@@ -269,14 +282,53 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         used = float(self._state.resource_work)
         return used / capacity if capacity > 0 else 0.0
 
+    def _profile_range(self, bin_index: int) -> tuple[int, int]:
+        start = (bin_index * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
+        stop = ((bin_index + 1) * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
+        if start == stop and self.horizon > 0:
+            start = min(start, self.horizon - 1)
+            stop = start + 1
+        return start, stop
+
+    def _update_resource_profile(
+        self, start: int, finish: int, demand: np.ndarray
+    ) -> None:
+        """Refresh only profile bins touched by the latest SGS insertion."""
+        if start == finish or self.horizon == 0:
+            return
+        profile = self._resource_profile.reshape(
+            self.resource_count,
+            RESOURCE_PROFILE_CHANNEL_COUNT,
+            RESOURCE_PROFILE_BIN_COUNT,
+        )
+        for bin_index, (bin_start, bin_stop) in enumerate(
+            self._resource_profile_ranges
+        ):
+            overlap = max(0, min(finish, bin_stop) - max(start, bin_start))
+            if not overlap:
+                continue
+            self._resource_profile_sums[:, bin_index] += demand * overlap
+            width = bin_stop - bin_start
+            profile[:, 0, bin_index] = (
+                self._resource_profile_sums[:, bin_index]
+                / width
+                / self._capacity_scale
+            )
+            profile[:, 1, bin_index] = (
+                self._state.usage[bin_start:bin_stop].max(axis=0)
+                / self._capacity_scale
+            )
+
     def _observation(self) -> dict[str, np.ndarray]:
         status = self._status
         status.fill(0)
         state = self._state
-        for activity_id, finish in state.finishes.items():
-            status[self.activity_index[activity_id]] = (
-                2 if state.terminated or finish < state.current_time else 1
-            )
+        scheduled = self._finish_times >= 0
+        status[scheduled] = np.where(
+            state.terminated | (self._finish_times[scheduled] < state.current_time),
+            2,
+            1,
+        )
 
         precedence = self._precedence
         np.equal(state.remaining_predecessors, 0, out=precedence)
@@ -286,25 +338,6 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         frontier_usage = state.usage[state.current_time - 1] if state.current_time > 0 else 0
         remaining = self._remaining_capacity
         np.subtract(self._capacities, frontier_usage, out=remaining)
-        profile = self._resource_profile.reshape(
-            self.resource_count,
-            RESOURCE_PROFILE_CHANNEL_COUNT,
-            RESOURCE_PROFILE_BIN_COUNT,
-        )
-        profile.fill(0.0)
-        if self.horizon > 0:
-            normalized_usage = state.usage[: self.horizon].astype(np.float32)
-            normalized_usage /= np.maximum(self._capacities, 1)[None, :]
-            for bin_index in range(RESOURCE_PROFILE_BIN_COUNT):
-                start = (bin_index * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
-                stop = ((bin_index + 1) * self.horizon) // RESOURCE_PROFILE_BIN_COUNT
-                if start == stop:
-                    sample = min(start, self.horizon - 1)
-                    values = normalized_usage[sample : sample + 1]
-                else:
-                    values = normalized_usage[start:stop]
-                profile[:, 0, bin_index] = values.mean(axis=0)
-                profile[:, 1, bin_index] = values.max(axis=0)
         self._current_time[0] = state.current_time
         dynamic = self._dynamic_activity_features
         dynamic.fill(0.0)

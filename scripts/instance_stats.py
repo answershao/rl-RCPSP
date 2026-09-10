@@ -2,8 +2,8 @@
 
 Motivation
 ----------
-The PPO policy is trained on the generated pool but evaluated on PSPLIB j30-j120, RG300
-and Patterson.  Whether that transfer can work at all depends on how well the
+The PPO policy is trained on the generated pool but evaluated on PSPLIB
+j30-j120. Whether that transfer can work at all depends on how well the
 training pool covers the *input distribution the policy actually consumes* --
 not on raw instance counts.  This script measures that, so any change to the
 protocol (new generator settings, re-weighting, different normalisation) can be
@@ -43,8 +43,8 @@ from src.data.instances import read_protocol
 
 # Must match src.envs.observation; duplicated on purpose so this diagnostic can
 # run without importing the torch stack.
-MAX_SUCCESSORS = 96
-MAX_PREDECESSORS = 96
+MAX_SUCCESSORS = 20
+MAX_PREDECESSORS = 20
 
 FEATURE_COLUMNS = (
     "dur_over_max_duration",
@@ -120,8 +120,7 @@ def instance_parameters(inst) -> dict:
         )
     cp = float(downstream.max())
 
-    # Order strength over the transitive closure, as a bit mask per node so it
-    # stays cheap even at the global cap (302 activities).
+    # Order strength over the transitive closure, as a bit mask per node.
     index_of = {node: i for i, node in enumerate(ids)}
     real_mask = 0
     for i, node in enumerate(ids):

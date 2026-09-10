@@ -12,22 +12,19 @@
 | 套件 | 数量 | 格式 | 位置 | 角色 |
 |---|---|---|---|---|
 | PSPLIB j30–j120 | 2040 | `.sm` | `data/psplib/` | **test（主测试集）**，BKS 已知 → 精确 gap；训练全程不可见 |
-| 生成池 psp_grid_bal | 1216 | `.rcp` | `data/generated/psp_grid_bal/` | **训练池**（PSPLIB 名义因子网格上的新实例；336 格 × 按 n=30/60/90/120 配平 8/4/2/1，`scripts/generate_pool.py` 生成，train 1148 + val 68） |
-| RG30（Set 1–5） | 1800 | `.rcp` | `data/oras/RCPSP/RG30/` | 历史训练池（协议已退役；数据保留，仅 `--suites rg30` 基线可用） |
-| RG300 | 480 | `.rcp` | `data/oras/RCPSP/RG300/` | 可选泛化参考（跨规模 302 活动；非主 test） |
-| Patterson | 110 | `.rcp` | `data/oras/RCPSP/Patterson/` | 可选补充参考（非主 test） |
+| 生成池 psp_grid_bal | 1216 | `.rcp` | `data/generated/psp_grid_bal/` | **训练池**（PSPLIB 名义因子网格上的新实例；336 格 × 按 n=30/60/90/120 配平 8/4/2/1，`scripts/generate_pool.py` 生成，train 1088 + val 128） |
 | BKS | — | xlsx | `data/bks/RCPLIB (Parameters and BKS).xlsx` | 最优值来源（合成 → json）+ PSPLIB 名义因子设计（`All` sheet → `scripts/psplib_design.py`） |
 
 固定约定：
 
-- **`splits.json` 是唯一切分清单**（2026-09-10 起 = 生成池协议）：`train`(1148) /
-  `validation`(68) / `evaluation.{psplib_j30,j60,j90,j120,rg300,patterson}`。所有入口只读它取数，
-  禁止自行扫描目录当切分。（`read_protocol` 仍兼容旧键名 `rg30_train`/`rg30_validation`。）
+- **`splits.json` 是唯一切分清单**（2026-09-10 起 = 生成池协议）：`train`(1088) /
+  `validation`(128，每种规模 32) / `evaluation.{psplib_j30,j60,j90,j120}`。所有入口只读它取数，
+  禁止自行扫描目录当切分。
 - **解析唯一入口**：`src/data/parsers.py`（.sm/.rcp → RCPSPInstance）→ `src/data/adapter.py`：
   `load_core_instance(path, name=None)`（→ core `Instance`）与 `to_core_instance`。
-- 实例唯一标识 = **相对路径去扩展名**（`instance_id`，RG30 跨 Set 有同名 stem，不可只用文件名）。
-- 全局模型 cap：**302 活动 / 4 资源 / MAX_SUCCESSORS=96 + MAX_PREDECESSORS=96**（单模型零样本覆盖 j30→RG300）。
-  GIN 消息按邻居数取均值（非求和），否则 RG300 稠密图会让嵌入幅度爆炸；入/出度以显式特征喂入。
+- 实例唯一标识 = **相对路径去扩展名**（`instance_id`）。
+- 全局模型 cap：**122 活动 / 4 资源 / MAX_SUCCESSORS=20 + MAX_PREDECESSORS=20**。
+  GIN 消息按邻居数取均值（非求和）；入/出度以显式特征喂入。
 - BKS 缓存：`data/bks/bks_psplib.json`（`scripts/extract_bks.py` 从 PSPLIB sheet 的 160 个 UB 类列取
   min 合成）。⚠️ 勿单独引用 `UB-LAA/LAB/LSA/LSB/LPA/LPB-*` 列（恒等于工期总和的平凡兜底 UB）。
 - **训练池也是登记套件**：`SUITE_SPECS` 增 `psp_grid` → `data/generated/psp_grid_bal`（role=`training-pool`），
@@ -48,7 +45,7 @@
 | 序 | 阶段 | 入口 | 输入依赖 | 产物 |
 |---|---|---|---|---|
 | **S0** | 环境自检 | `python -m pytest -q -W error` | — | 65 passed |
-| **S1** | 生成训练池 + 协议 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-fraction 0.2 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json`，生成后把 manifest 拷为 `splits.json` | `src/data/generator.py` + RCPLIB xlsx 名义设计 | 1216 `.rcp` + `splits.json`（seed 20260910 可复现；协议不变则跳过） |
+| **S1** | 生成训练池 + 协议 | `python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 --validation-per-size 32 --widen --workers 8 --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json`，生成后把 manifest 拷为 `splits.json` | `src/data/generator.py` + RCPLIB xlsx 名义设计 | 1216 `.rcp` + `splits.json`（seed 20260910 可复现；协议不变则跳过） |
 | **S2** | 协议诊断（regime 参数源） | `python -m scripts.instance_stats --data-root data --workers 8` | `splits.json` | `outputs/instance_stats/{instances,summary,coverage}.csv` |
 | **S3** | 训练池参照规则 | `python -m scripts.baselines --data-root data --instance-workers 8 --output-csv outputs/rules_psp_grid/makespan_summary.csv`（`--suites` 已默认 `psp_grid`） | `psp_grid` 套件（已登记）+ `splits.json` | 供 S5 择优用的 `serial_LST` 参照列 |
 | **S4** | 基线（test 侧） | `python -m scripts.baselines` → `scripts.run_ga` → `scripts.run_gphh`（`--suites psplib_j30,psplib_j60,psplib_j90,psplib_j120`） | —（GPHH 另需 S1 的 train 分片） | `outputs/{rules,ga,gphh}_psplib/…` |
@@ -56,7 +53,7 @@
 | **S6** | 汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … [--ppo …] --bks data/bks/bks_psplib.json --params outputs/instance_stats/instances.csv --out-dir outputs/aggregate_psplib` | S2 + S4（有 PPO 时 + S5） | `merged_detail.csv` + `summary_by_suite.csv` + `summary_by_regime.csv` |
 
 > `scripts/train_ppo.py --ref-rules` 默认 `outputs/rules_psp_grid/makespan_summary.csv`（= S3 产物），
-> 并要求它覆盖全部 68 个 validation 实例 —— **S3 必须先跑，否则 S5 直接报错**（`FileNotFoundError`，
+> 并要求它覆盖全部 128 个 validation 实例 —— **S3 必须先跑，否则 S5 直接报错**（`FileNotFoundError`，
 > 或覆盖不全时 `--ref-rules does not cover N validation instances`）。参照列默认取 `serial_LST`
 > （`--ref-rule`）。`bash eval_cpu.sh`（`--evaluate-only`）不受影响：它在读参照规则之前就已 return。
 
@@ -76,7 +73,7 @@
 
 | 入口 | 取数 | 关键参数 | 产物 |
 |---|---|---|---|
-| `python -m scripts.generate_pool` | PSPLIB + RCPLIB xlsx | `--mode/--replicates/--validation-fraction/--widen/--workers` | 生成池 `.rcp` + manifest（当前 `splits.json` 的来源） |
+| `python -m scripts.generate_pool` | PSPLIB + RCPLIB xlsx | `--mode/--replicates/--validation-per-size/--widen/--workers` | 生成池 `.rcp` + manifest（当前 `splits.json` 的来源） |
 | `python -m scripts.instance_stats` | `--splits` + 数据根 | `--workers/--output-dir/--rf-tol/--extra-pool` | `instances.csv` / `summary.csv` / `coverage.csv` |
 | `python -m scripts.baselines` | `--data-root/--suites` | `--max-instances 0`=全量、`--instance-workers` | `makespan_summary.csv` |
 | `python -m scripts.run_ga` | 同 baselines | `--population 50 --generations 200 --seed` | `ga.csv` |
@@ -87,7 +84,7 @@
 
 ## 3. 测试体系（pytest，本机 Mac 标准）
 
-- 一条命令全量回归（含 4430 全语料解析、SB3 短训）：
+- 一条命令全量回归（含 3256 个主协议实例解析、SB3 短训）：
   ```bash
   source /Users/fn/miniconda3/etc/profile.d/conda.sh && conda activate rl
   python -m pytest -q          # 65 passed（≈40s 快测 + ≈4min 全语料 slow）

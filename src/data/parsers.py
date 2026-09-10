@@ -1,8 +1,8 @@
 """
 Unified parser for RCPSP instance files.
 Formats:
-  - .sm  : PSPLIB / Patterson format (keyword sections)
-  - .rcp : OR&S / ProGen format (raw numbers)
+  - .sm  : PSPLIB format (keyword sections)
+  - .rcp : generated ProGen-style format (raw numbers)
 Both produce RCPSPInstance with:
   - 0-indexed activities, activity 0 = dummy source, n-1 = dummy sink
   - successors / predecessors as adjacency lists

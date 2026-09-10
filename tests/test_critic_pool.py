@@ -2,7 +2,7 @@
 
 The critic summarizes a variable number of activity embeddings.  Its pooled
 vector must stay in the same numeric range whether an instance has 32
-activities (PSPLIB j30) or 302 (RG300), otherwise the value head extrapolates
+activities (PSPLIB j30) or 122 (PSPLIB j120), otherwise the value head extrapolates
 far outside the range it was trained on.
 """
 
@@ -51,13 +51,13 @@ class GraphPoolingTest(unittest.TestCase):
     """Pooled statistics must not depend on how many real nodes exist."""
 
     def test_pooled_summary_does_not_scale_with_real_node_count(self):
-        # 32 real nodes (j30) and 302 real nodes (RG300) holding the same
+        # 32 nodes (j30) and 122 nodes (j120) holding the same
         # per-node value must pool to the same vector.  A node-count sum would
-        # return 32*v versus 302*v here, which is the magnitude drift this
+        # return 32*v versus 122*v here, which is the magnitude drift this
         # pooling exists to avoid.
-        j30_like = pool_graph_embedding(*_row(302, 32))
-        rg300_like = pool_graph_embedding(*_row(302, 302))
-        torch.testing.assert_close(j30_like, rg300_like)
+        j30_like = pool_graph_embedding(*_row(122, 32))
+        j120_like = pool_graph_embedding(*_row(122, 122))
+        torch.testing.assert_close(j30_like, j120_like)
 
     def test_padding_slots_cannot_win_the_max(self):
         embeddings, mask, global_embedding = _row(8, 3, real_value=-1.0)

@@ -11,14 +11,11 @@ This script sweeps them on the real machine and prints rollout / update / total
 throughput per combination, so ``train_cpu.sh`` and ``train_a800.sh`` can be
 tuned from measurements instead of guesses::
 
-    python -m scripts.bench_ppo --caps 32 302 --threads 8 16 20 \
+    python -m scripts.bench_ppo --caps 122 --threads 8 16 20 \
         --batch-sizes 512 1024 4096
 
-The ``--caps`` sweep is the important one: every trainable policy parameter is
-size-agnostic, so training on the smallest cap that covers the training pool
-(32 for the RG30 pool) and widening the policy afterwards
-(``src.training.ppo.widen_policy``) produces the same policy for a fraction of
-the compute.
+The main protocol uses one 122-node cap for generated training data and held-out
+PSPLIB j30-j120 evaluation data.
 """
 from __future__ import annotations
 
@@ -55,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--splits", type=Path, default=Path("splits.json"))
     parser.add_argument("--instances", type=int, default=64,
                         help="training instances to load into the static catalog")
-    parser.add_argument("--caps", type=int, nargs="+", default=[32, 302],
+    parser.add_argument("--caps", type=int, nargs="+", default=[122],
                         help="padded activity caps to compare")
     parser.add_argument("--threads", type=int, nargs="+", default=[8, 16, 20],
                         help="torch intra-op threads for the training process")

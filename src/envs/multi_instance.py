@@ -91,8 +91,7 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
         self._active_index = index
         return self._encode(observation), {
             **info,
-            # Unique instance id (data-root-relative path without extension);
-            # plain file stems collide across the RG30 Set directories.
+            # Unique instance id (data-root-relative path without extension).
             "instance": self.instances[index].name,
         }
 

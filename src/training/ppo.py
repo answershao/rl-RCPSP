@@ -208,101 +208,6 @@ def create_ppo(
     return model
 
 
-def widen_policy(
-    model: PPO,
-    *,
-    instances: Sequence[Instance],
-    max_activities: int,
-    max_resources: int,
-    static_cache: StaticGraphCache,
-    device: str = "cpu",
-) -> PPO:
-    """Return a new policy resized to a larger activity/resource cap.
-
-    Every *trainable* parameter of the RCPSP policy is size-agnostic: the
-    activity encoder, both GIN layers, the per-node actor and the graph-pooling
-    critic are all shared across nodes, so no weight shape depends on
-    ``max_activities``.  Only the six ``static_*`` graph buffers change shape,
-    and those are pure instance data rebuilt from ``static_cache``.
-
-    A policy trained on a small padded graph (the RG30 training pool is 32
-    activities) can therefore be evaluated on the full 302-activity cap by
-    transferring its weights.  This makes the training rollout several times
-    cheaper without changing the learned function: for one fixed instance the
-    logits and value of the small and widened policies are bit-identical.
-
-    ``instances``/``static_cache`` seed the returned model's graph cache.  They
-    are replaced by :func:`evaluate_paths` when a real evaluation split is
-    loaded, so any catalog at the target cap is valid here; training callers
-    pass their own training catalog.
-
-    Caveat for A/B comparisons: the *function* is bit-identical, but a full PPO
-    run is not.  The action space is ``Discrete(max_activities)`` and
-    ``torch.multinomial`` consumes a different amount of RNG depending on the
-    category count, so stochastic rollouts diverge from the second action
-    onwards.  Training at a smaller cap therefore behaves like a different
-    random seed rather than a bit-exact replay of training at the global cap;
-    compare caps with deterministic evaluation.
-    """
-    from src.envs.multi_instance import MultiInstanceRCPSPEnv
-
-    extractor = model.policy.features_extractor
-    if not isinstance(extractor, SharedDirectedGINExtractor):
-        raise TypeError("model does not use the RCPSP static graph cache")
-    if not instances:
-        raise ValueError("instances must not be empty")
-    if max_activities < extractor.max_activities:
-        raise ValueError(
-            f"cannot widen from {extractor.max_activities} to {max_activities} activities"
-        )
-    if max_resources < extractor.max_resources:
-        raise ValueError(
-            f"cannot widen from {extractor.max_resources} to {max_resources} resources"
-        )
-    if static_cache.instance_names != tuple(instance.name for instance in instances):
-        raise ValueError("static cache ordering does not match the widening catalog")
-
-    probe = MultiInstanceRCPSPEnv(
-        [instances[0].name],
-        max_activities=max_activities,
-        max_resources=max_resources,
-        instance_indices=[0],
-        catalog_size=len(instances),
-        loader=lambda _path: instances[0],
-    )
-    try:
-        widened = create_ppo(
-            probe,
-            instances=list(instances),
-            seed=int(getattr(model, "seed", None) or 0),
-            device=device,
-            # SB3 asserts batch_size > 1; nothing is ever stepped on this probe.
-            n_steps=2,
-            batch_size=2,
-            n_epochs=1,
-            gin_layers=len(extractor.gin_layers),
-            mixed_precision=extractor.mixed_precision,
-            static_cache=static_cache,
-        )
-    finally:
-        probe.close()
-    # Static graph buffers are instance data, not weights, so they stay with the
-    # target extractor and only parameters are transferred.
-    state = {
-        key: value
-        for key, value in model.policy.state_dict().items()
-        if ".static_" not in key
-    }
-    report = widened.policy.load_state_dict(state, strict=False)
-    missing = [key for key in report.missing_keys if ".static_" not in key]
-    if missing or report.unexpected_keys:
-        raise RuntimeError(
-            "policy widening is not shape-compatible: "
-            f"missing={missing} unexpected={list(report.unexpected_keys)}"
-        )
-    return widened
-
-
 def run_policy_episode(model: PPO, env: PolicyEnvironment, *, seed: int | None = None) -> dict:
     """Run one deterministic policy episode and return its terminal info."""
     observation, _ = env.reset(seed=seed)
@@ -334,10 +239,9 @@ def evaluate_paths(
     the two must agree exactly:
 
     * single-process / unique-stem usage may keep the default ``Path.stem``;
-    * protocol callers (``splits.json`` paths, where RG30 file stems collide
-      across the ``Set`` directories) must pass ``name_fn=instance_id`` and the
-      matching protocol loader, or this check fails loudly instead of silently
-      reusing a cache that maps paths to the wrong activities.
+    * protocol callers must pass ``name_fn=instance_id`` and the matching
+      protocol loader, or this check fails loudly instead of silently reusing a
+      cache that maps paths to the wrong activities.
 
     ``evaluation_cache``/``restore_cache`` switch the extractor's static cache
     for the duration of the evaluation and restore the previous one afterwards.

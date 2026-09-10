@@ -39,14 +39,14 @@ fi
 N_ENVS="${N_ENVS:-32}"
 N_STEPS="${N_STEPS:-384}"
 # Minibatch size drives update time, which dominates a PPO iteration.  Large
-# minibatches blow the activation working set out of cache (batch * 302 nodes *
+# minibatches blow the activation working set out of cache (batch * 122 nodes *
 # 32 embedding dims in fp32), so smaller values measured markedly faster.  Run
 # `python -m scripts.bench_ppo --help` on the target host to confirm the optimum.
-BATCH_SIZE="${BATCH_SIZE:-1024}"
+BATCH_SIZE="${BATCH_SIZE:-4096}"
 N_EPOCHS="${N_EPOCHS:-3}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
-LEARNING_RATE="${LEARNING_RATE:-2e-4}"
+LEARNING_RATE="${LEARNING_RATE:-5e-4}"
 ENT_COEF="${ENT_COEF:-0.001}"
 VF_COEF="${VF_COEF:-0.1}"
 TARGET_KL="${TARGET_KL:-0.01}"
@@ -58,24 +58,19 @@ VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
 SEED="${SEED:-17}"
 EVAL_ALL="${EVAL_ALL:-0}"
-# Train on the smallest padded graph that covers the training pool (122 for the
-# current generated pool psp_grid_bal) and widen the policy to the global cap
-# before evaluation.  Set to the global cap, or pass an explicit integer, to
-# disable the widening path.
-TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
+EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
 EVAL_ARGS=()
 if [[ "${EVAL_ALL}" == "1" ]]; then
-    EVAL_ARGS=(--eval-all)
+    EVAL_ARGS=(--eval-suites "${EVAL_SUITES}")
 fi
 
 nohup python -m scripts.train_ppo \
     --data-root "${DATA_ROOT}" \
     --splits "${SPLITS_PATH}" \
     --ref-rules "${REF_RULES}" \
-    --max-activities 302 \
+    --max-activities 122 \
     --max-resources 4 \
-    --train-max-activities "${TRAIN_MAX_ACTIVITIES}" \
     --n-envs "${N_ENVS}" \
     --total-timesteps "${TOTAL_TIMESTEPS}" \
     --n-steps "${N_STEPS}" \

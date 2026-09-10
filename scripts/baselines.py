@@ -4,9 +4,7 @@
 Instances are discovered under ``--data-root``:
 
   PSPLIB    data/psplib/{j30,j60,j90,j120}/*.sm   (BKS known, main benchmark)
-  RG30      data/oras/RCPSP/RG30/**/*.rcp         (large training pool, 5 sets)
-  RG300     data/oras/RCPSP/RG300/*.rcp           (large generalisation test)
-  Patterson data/oras/RCPSP/Patterson/*.rcp       (supplementary)
+  generated data/generated/psp_grid_bal/**/*.rcp  (training reference rules)
 
 Every instance is parsed by the unified parser (``src.data.parsers``), adapted
 to the core ``Instance`` shape (``src.data.adapter``) and scheduled once per
@@ -47,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path("outputs/baselines_rcpsp_4430/makespan_summary.csv"),
+        default=Path("outputs/baselines_rcpsp/makespan_summary.csv"),
     )
     return parser.parse_args()
 

@@ -75,9 +75,8 @@ def _aggregate_edge_messages(
 ) -> tuple[th.Tensor, th.Tensor]:
     """Mean-pool messages in both directions using only compact, real edges.
 
-    Summing would scale each node's message with its degree, which explodes on
-    the dense RG300 graphs (in-degree up to 91, versus 3 for PSPLIB j30-j120)
-    while the encoder ends in ReLU so nothing cancels.  Dividing by the degree
+    Summing would scale each node's message with its degree while the encoder
+    ends in ReLU, so nothing cancels. Dividing by the degree
     keeps message magnitudes comparable across suites; the raw counts stay
     available to the network as explicit node features.
     """
@@ -94,6 +93,43 @@ def _aggregate_edge_messages(
     successor_sum.scatter_add_(1, expanded_sources, target_messages)
     predecessor_message = predecessor_sum / in_degree.clamp(min=1.0).unsqueeze(-1)
     successor_message = successor_sum / out_degree.clamp(min=1.0).unsqueeze(-1)
+    return predecessor_message, successor_message
+
+
+def _compact_edge_indices(
+    edge_sources: th.Tensor,
+    edge_targets: th.Tensor,
+    edge_mask: th.Tensor,
+    node_count: int,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Flatten a padded edge batch into indices for one disjoint graph."""
+    batch_offsets = (
+        th.arange(edge_sources.shape[0], device=edge_sources.device).unsqueeze(1)
+        * node_count
+    )
+    return (
+        (edge_sources + batch_offsets)[edge_mask],
+        (edge_targets + batch_offsets)[edge_mask],
+    )
+
+
+def _aggregate_compact_edge_messages(
+    embeddings: th.Tensor,
+    flat_sources: th.Tensor,
+    flat_targets: th.Tensor,
+    in_degree: th.Tensor,
+    out_degree: th.Tensor,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Aggregate a batch without materializing its padded edge slots."""
+    flat_embeddings = embeddings.flatten(0, 1)
+    predecessor_sum = th.zeros_like(flat_embeddings)
+    predecessor_sum.index_add_(0, flat_targets, flat_embeddings[flat_sources])
+    successor_sum = th.zeros_like(flat_embeddings)
+    successor_sum.index_add_(0, flat_sources, flat_embeddings[flat_targets])
+    predecessor_message = predecessor_sum.view_as(embeddings)
+    successor_message = successor_sum.view_as(embeddings)
+    predecessor_message = predecessor_message / in_degree.clamp(min=1.0).unsqueeze(-1)
+    successor_message = successor_message / out_degree.clamp(min=1.0).unsqueeze(-1)
     return predecessor_message, successor_message
 
 
@@ -191,6 +227,8 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         edge_sources = np.zeros((self.instance_count, max_edges), dtype=np.int64)
         edge_targets = np.zeros((self.instance_count, max_edges), dtype=np.int64)
         edge_mask = np.zeros((self.instance_count, max_edges), dtype=np.bool_)
+        in_degrees = np.zeros(expected_node_shape, dtype=np.float32)
+        out_degrees = np.zeros(expected_node_shape, dtype=np.float32)
         source_slots = np.broadcast_to(
             np.arange(self.max_activities, dtype=np.int64)[:, None],
             static_cache.successor_indices.shape[1:],
@@ -202,10 +240,14 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
                 instance_index
             ][valid_edges[instance_index]]
             edge_mask[instance_index, :count] = True
+            np.add.at(out_degrees[instance_index], edge_sources[instance_index, :count], 1)
+            np.add.at(in_degrees[instance_index], edge_targets[instance_index, :count], 1)
         compact_arrays = {
             "static_edge_sources": edge_sources,
             "static_edge_targets": edge_targets,
             "static_edge_mask": edge_mask,
+            "static_in_degrees": in_degrees,
+            "static_out_degrees": out_degrees,
         }
         for name, array in compact_arrays.items():
             tensor = th.from_numpy(array).to(device=device)
@@ -270,14 +312,40 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         edge_sources = self.static_edge_sources[instance_indices]
         edge_targets = self.static_edge_targets[instance_indices]
         edge_mask = self.static_edge_mask[instance_indices]
-        in_degree, out_degree = _edge_degrees(
-            edge_sources, edge_targets, edge_mask, n, embeddings.dtype
-        )
+        in_degree = self.static_in_degrees[instance_indices].to(embeddings.dtype)
+        out_degree = self.static_out_degrees[instance_indices].to(embeddings.dtype)
+
+        # CPU scatter/gather cost is dominated by the padded edge dimension
+        # (313 maximum versus about 110 edges on average in the training pool).
+        # Compact once and reuse the disjoint-graph indices for every GIN layer.
+        # Keep the fixed-shape path for CUDA and torch.compile, where dynamic
+        # boolean indexing can inhibit graph capture and padded kernels fare better.
+        compact_edges = embeddings.device.type == "cpu" and not th.compiler.is_compiling()
+        if compact_edges:
+            flat_sources, flat_targets = _compact_edge_indices(
+                edge_sources, edge_targets, edge_mask, n
+            )
 
         for layer in self.gin_layers:
-            predecessor_message, successor_message = _aggregate_edge_messages(
-                embeddings, edge_sources, edge_targets, edge_mask, in_degree, out_degree
-            )
+            if compact_edges:
+                predecessor_message, successor_message = (
+                    _aggregate_compact_edge_messages(
+                        embeddings,
+                        flat_sources,
+                        flat_targets,
+                        in_degree,
+                        out_degree,
+                    )
+                )
+            else:
+                predecessor_message, successor_message = _aggregate_edge_messages(
+                    embeddings,
+                    edge_sources,
+                    edge_targets,
+                    edge_mask,
+                    in_degree,
+                    out_degree,
+                )
             embeddings = (
                 layer(embeddings, predecessor_message, successor_message) * valid_nodes
             )
@@ -302,13 +370,12 @@ def pool_graph_embedding(
 
     Both the mean and the max are bounded by the per-node embedding range, so
     the pooled vector stays in the same numeric range whether an instance has
-    32 activities (j30) or 302 (RG300).  A node-count-dependent sum would grow
+    32 activities (j30) or 122 (j120). A node-count-dependent sum would grow
     linearly with the number of real activities and push the critic outside the
     value range it was trained on.
 
-    Note this bounds the *node count* factor only.  Message passing still sums
-    over neighbours, so high-degree graphs such as RG300 can inflate the node
-    embeddings themselves; that has to be handled in the aggregation.
+    Note this bounds the *node count* factor only. Message passing still has to
+    normalize neighbour aggregation separately.
     """
     valid = activity_mask.unsqueeze(-1)
     masked = embeddings * valid

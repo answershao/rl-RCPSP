@@ -35,24 +35,19 @@ LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 N_ENVS="${N_ENVS:-48}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6400000}"
 EVAL_ALL="${EVAL_ALL:-1}"
-# Train on the smallest padded graph covering the training pool (122 for the
-# current generated pool psp_grid_bal) and widen the policy to the global cap;
-# the GIN/actor run on every padded node, so this removes the wasted compute on
-# zero nodes.
-TRAIN_MAX_ACTIVITIES="${TRAIN_MAX_ACTIVITIES:-auto}"
+EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
 EVAL_ARGS=()
 if [[ "${EVAL_ALL}" == "1" ]]; then
-    EVAL_ARGS=(--eval-all)
+    EVAL_ARGS=(--eval-suites "${EVAL_SUITES}")
 fi
 
 nohup python -m scripts.train_ppo \
     --data-root "${DATA_ROOT}" \
     --splits "${SPLITS_PATH}" \
     --ref-rules "${REF_RULES}" \
-    --max-activities 302 \
+    --max-activities 122 \
     --max-resources 4 \
-    --train-max-activities "${TRAIN_MAX_ACTIVITIES}" \
     --n-envs "${N_ENVS}" \
     --total-timesteps "${TOTAL_TIMESTEPS}" \
     --n-steps 256 \

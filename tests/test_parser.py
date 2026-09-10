@@ -14,7 +14,7 @@ from src.data.adapter import load_core_instance
 from src.data.parsers import load_instance
 
 J30_SM = "data/psplib/j30/j301_1.sm"
-RG300_RCP = "data/oras/RCPSP/RG300/RG300_1.rcp"
+GENERATED_RCP = "data/generated/psp_grid_bal/n120/c0241_r00.rcp"
 
 
 def test_sm_parse_j30(repo_root):
@@ -25,11 +25,10 @@ def test_sm_parse_j30(repo_root):
     assert len(inst.topological_order()) == 32
 
 
-def test_rcp_parse_rg300(repo_root):
-    inst = load_instance(repo_root / RG300_RCP)
-    assert inst.n_activities == 302 and inst.n_renewable == 4
-    assert (inst.capacities == 10).all()
-    assert len(inst.successors[0]) == 72  # dummy source successor count
+def test_rcp_parse_generated_instance(repo_root):
+    inst = load_instance(repo_root / GENERATED_RCP)
+    assert inst.n_activities == 122 and inst.n_renewable == 4
+    assert len(inst.topological_order()) == 122
 
 
 def test_parsed_instances_are_schedulable_by_core(repo_root):
@@ -38,7 +37,7 @@ def test_parsed_instances_are_schedulable_by_core(repo_root):
     Guarantees parser output is consumable by the canonical kernel without any
     parser-local scheduling shim (R2: single serial SGS lives in core only).
     """
-    for rel in (J30_SM, RG300_RCP):
+    for rel in (J30_SM, GENERATED_RCP):
         instance = load_core_instance(repo_root / rel)
         schedule = generate_schedule(instance)  # FIFO default priority
         assert schedule.makespan > 0, f"core SGS produced empty result for {rel}"

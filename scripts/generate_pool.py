@@ -2,9 +2,7 @@
 
 The problem this solves
 -----------------------
-``splits.json`` currently makes RG30 the only training pool.  RG30 is a *point*
-in generator-parameter space (RF fixed at 0.75, RS in [0.003, 0.046], n fixed at
-30), while PSPLIB j30-j120 is a designed factorial experiment over (RF, RS, NC)
+PSPLIB j30-j120 is a designed factorial experiment over (RF, RS, NC)
 at four sizes: 48 cells for j30/j60/j90 (4 RF x 4 RS x 3 NC) and 60 for j120
 (4 x 5 x 3).  Training on a point and testing on a grid is exactly the
 distribution shift measured by ``scripts/instance_stats.py``.
@@ -52,12 +50,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-from scripts.common import find_instances, map_jobs
+from scripts.common import EVALUATION_SUITES, find_instances, map_jobs
 from scripts.instance_stats import instance_parameters
 from scripts.psplib_design import load_psplib_design
 from src.data.adapter import load_core_instance
@@ -240,6 +240,57 @@ def parse_replicates(value: str) -> dict[int, int]:
     return dict(zip(sorted(PSPLIB_SIZES.values()), values))
 
 
+def stratified_validation_cells(
+    labels: list[dict], fraction: float, seed: int, per_size: int = 0
+) -> set[int]:
+    """Select per-size holdout cells with balanced RF/RS/NC marginals."""
+    selected: set[int] = set()
+    rng = np.random.default_rng(seed)
+
+    for size in sorted({label["n"] for label in labels}):
+        candidates = [
+            index for index, label in enumerate(labels) if label["n"] == size
+        ]
+        quota = per_size or max(1, math.ceil(len(candidates) * fraction))
+        if quota > len(candidates):
+            raise ValueError(
+                f"validation quota {quota} exceeds {len(candidates)} cells for n={size}"
+            )
+        axes = ("RF", "RS", "NC")
+        level_totals = {
+            axis: Counter(labels[index][axis] for index in candidates)
+            for axis in axes
+        }
+        targets = {
+            axis: {
+                level: quota * count / len(candidates)
+                for level, count in totals.items()
+            }
+            for axis, totals in level_totals.items()
+        }
+        counts = {axis: Counter() for axis in axes}
+        tie_break = {index: float(rng.random()) for index in candidates}
+        remaining = set(candidates)
+
+        for _ in range(quota):
+            def score(index: int) -> tuple[float, float, int]:
+                label = labels[index]
+                squared_error = sum(
+                    (counts[axis][level] + (label[axis] == level) - target) ** 2
+                    for axis in axes
+                    for level, target in targets[axis].items()
+                )
+                return squared_error, tie_break[index], index
+
+            chosen = min(remaining, key=score)
+            remaining.remove(chosen)
+            selected.add(chosen)
+            for axis in axes:
+                counts[axis][labels[chosen][axis]] += 1
+
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("psp-grid", "random"), default="psp-grid")
@@ -270,7 +321,14 @@ def main() -> None:
         type=float,
         default=0.2,
         help="fraction of cells per size whose last replicate is held out for "
-        "training-period validation (per-cell holdouts would starve small quotas)",
+        "training-period validation; ignored when --validation-per-size is set",
+    )
+    parser.add_argument(
+        "--validation-per-size",
+        type=int,
+        default=0,
+        help="fixed number of cells held out for each activity size; 0 uses "
+        "--validation-fraction",
     )
     parser.add_argument("--seed", type=int, default=20260910)
     parser.add_argument("--workers", type=int, default=1)
@@ -345,26 +403,56 @@ def main() -> None:
     specs: list[dict] = []
     root = args.output.relative_to(args.data_root)
 
-    # Deterministic per-size validation holdout: every stride-th cell (within
-    # its size) contributes its *last* replicate to the validation split, so
-    # the holdout mirrors the train distribution even when a size gets a
-    # single replicate.
     if not 0.0 < args.validation_fraction <= 1.0:
         parser.error("--validation-fraction must be in (0, 1]")
-    stride_by_size: dict[int, int] = {
-        size: max(1, round(1.0 / args.validation_fraction))
-        for size in sorted({c[0] for c in coordinates})
-    }
-    cell_seen_by_size: dict[int, int] = {}
+    if args.validation_per_size < 0:
+        parser.error("--validation-per-size must be non-negative")
+    if labels is not None:
+        try:
+            validation_cells = stratified_validation_cells(
+                labels,
+                args.validation_fraction,
+                args.seed,
+                per_size=args.validation_per_size,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        validation_strategy = "stratified_rf_rs_nc_per_size"
+    else:
+        validation_cells = set()
+        if args.validation_per_size:
+            selection_rng = np.random.default_rng(args.seed)
+            for size in sorted({coordinate[0] for coordinate in coordinates}):
+                candidates = [
+                    index
+                    for index, coordinate in enumerate(coordinates)
+                    if coordinate[0] == size
+                ]
+                if args.validation_per_size > len(candidates):
+                    parser.error(
+                        f"--validation-per-size exceeds cell count for n={size}"
+                    )
+                validation_cells.update(
+                    selection_rng.choice(
+                        candidates, size=args.validation_per_size, replace=False
+                    ).tolist()
+                )
+        else:
+            stride = max(1, round(1.0 / args.validation_fraction))
+            seen_by_size: Counter[int] = Counter()
+            for index, coordinate in enumerate(coordinates):
+                size = coordinate[0]
+                if seen_by_size[size] % stride == 0:
+                    validation_cells.add(index)
+                seen_by_size[size] += 1
+        validation_strategy = "periodic_by_size"
 
     for cell_index, (coordinate, nominal) in enumerate(
         zip(coordinates, labels if labels is not None else [None] * len(coordinates))
     ):
         n, rf, rs, nc = coordinate
         spec = GeneratorSpec(n, rf, rs, nc)
-        cell_seen = cell_seen_by_size.get(n, 0)
-        cell_seen_by_size[n] = cell_seen + 1
-        is_holdout_cell = cell_seen % stride_by_size[n] == 0
+        is_holdout_cell = cell_index in validation_cells
         replicates = args.replicates[n]
         for replicate in range(replicates):
             seed = int(rng.integers(0, 2**31 - 1))
@@ -393,13 +481,24 @@ def main() -> None:
         "mode": args.mode,
         "seed": args.seed,
         "replicates": {str(k): v for k, v in sorted(args.replicates.items())},
-        "validation_fraction": args.validation_fraction,
+        **(
+            {"validation_per_size": args.validation_per_size}
+            if args.validation_per_size
+            else {"validation_fraction": args.validation_fraction}
+        ),
+        "validation_strategy": validation_strategy,
         "widen": bool(args.widen),
         "splits": {
             "train": sorted(train_entries),
             "validation": sorted(validation_entries),
         },
-        "evaluation": json.loads(args.splits.read_text()).get("evaluation", {}),
+        "evaluation": {
+            suite: paths
+            for suite, paths in json.loads(args.splits.read_text()).get(
+                "evaluation", {}
+            ).items()
+            if suite in EVALUATION_SUITES
+        },
         "counts": {
             "train": len(train_entries),
             "validation": len(validation_entries),

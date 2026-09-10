@@ -1,12 +1,11 @@
 """Bridge between the parser data layer and the core scheduling kernel.
 
-The parser in ``src.data.parsers`` (PSPLIB ``.sm`` / ProGen ``.rcp`` /
-Patterson) produces ``RCPSPInstance`` with 0-indexed flat activity ids.  The
+The parser in ``src.data.parsers`` (PSPLIB ``.sm`` / generated ``.rcp``)
+produces ``RCPSPInstance`` with 0-indexed flat activity ids. The
 scheduling kernel (``src.core.rcpsp.Instance``) uses the same 0-indexed
 activity ids and additionally materialises the predecessor map.
 
-All benchmark suites (PSPLIB j30-j120, RG30, RG300, Patterson) are
-single-project instances, so the adapter keeps the raw file ordering
+All protocol instances are single-project instances, so the adapter keeps the raw file ordering
 unchanged, including any dummy source/sink rows already present in
 ``.sm``/``.rcp`` (their durations are 0, so makespans are unaffected).
 """
@@ -23,9 +22,8 @@ def to_core_instance(inst: RCPSPInstance, *, name: str | None = None) -> Instanc
     """Convert one parsed single-project instance to the kernel ``Instance`` shape.
 
     ``name`` overrides the parsed file-stem name.  The PPO static graph cache
-    requires unique instance names, and file stems collide across RG30 ``Set``
-    directories, so callers training on ``splits.json`` should pass a unique
-    identifier (e.g. the data-root-relative path without its extension).
+    requires unique instance names, so callers training on ``splits.json``
+    should pass a data-root-relative identifier.
     """
     activities: dict[ActivityId, Activity] = {}
     predecessors: dict[ActivityId, list[ActivityId]] = {}

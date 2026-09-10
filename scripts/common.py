@@ -37,9 +37,6 @@ SUITE_SPECS: dict[str, tuple[str, str, str]] = {
     "psplib_j60": ("psplib/j60", "*.sm", "final-evaluation"),
     "psplib_j90": ("psplib/j90", "*.sm", "final-evaluation"),
     "psplib_j120": ("psplib/j120", "*.sm", "final-evaluation"),
-    "rg30": ("oras/RCPSP/RG30", "**/*.rcp", "historical-training-pool"),
-    "rg300": ("oras/RCPSP/RG300", "*.rcp", "final-evaluation"),
-    "patterson": ("oras/RCPSP/Patterson", "*.rcp", "final-evaluation"),
     # The active training pool is registered here for one reason: S5's
     # checkpoint selection needs a reference-rule CSV covering the `validation`
     # split, and `scripts.baselines` is the only producer of that CSV -- it can
@@ -47,9 +44,8 @@ SUITE_SPECS: dict[str, tuple[str, str, str]] = {
     "psp_grid": ("generated/psp_grid_bal", "**/*.rcp", "training-pool"),
 }
 
-# Suites that may be reported as benchmark results.  Every training pool is
-# excluded: scoring a method on the data it was fitted to is not a benchmark.
-# (rg30 is a retired pool, psp_grid is the active one.)
+# Suites that may be reported as benchmark results. The generated training
+# pool is excluded so fitted methods are evaluated only on held-out PSPLIB.
 EVALUATION_SUITES = tuple(
     suite for suite, spec in SUITE_SPECS.items() if spec[2] == "final-evaluation"
 )
@@ -66,7 +62,7 @@ _NUMBER_TOKEN = re.compile(r"\d+")
 
 
 def natural_key(path: Path) -> tuple:
-    """Numeric-aware sort key so j3021_1 < j3021_10 and Pat2 < Pat10."""
+    """Numeric-aware sort key so j3021_1 sorts before j3021_10."""
     return tuple(int(token) if token.isdigit() else token for token in _NUMBER_TOKEN.split(path.stem)) + (
         path.name,
     )

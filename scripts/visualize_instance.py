@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the Gantt chart and AON network for one single-project RCPSP instance.
 
-Accepts any ``.sm`` (PSPLIB) / ``.rcp`` (ProGen / Patterson) instance parsed by
+Accepts any ``.sm`` (PSPLIB) / ``.rcp`` (generated ProGen-style) instance parsed by
 ``src.data.parsers`` and adapted through ``src.data.adapter``.
 """
 

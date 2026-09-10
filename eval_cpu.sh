@@ -18,6 +18,7 @@ DATA_ROOT="${DATA_ROOT:-data}"
 SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
+EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 MODEL_PATH="${MODEL_DIR}/final_model.zip"
 
 if [[ ! -f "${MODEL_PATH}" ]]; then
@@ -29,12 +30,12 @@ LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo}"
 mkdir -p "${LOG_DIR}"
 EVAL_LOG_FILE="${LOG_DIR}/eval_cpu_baseline_$(date +%Y%m%d_%H%M%S).log"
 
-# --evaluate-only with no --eval-suites evaluates every evaluation group in
-# splits.json (PSPLIB j30-j120 / RG300 / Patterson), the final-model protocol.
+# The main protocol evaluates only the four held-out PSPLIB size groups.
 nohup python -m scripts.train_ppo \
     --data-root "${DATA_ROOT}" \
     --evaluate-only \
     --splits "${SPLITS_PATH}" \
+    --eval-suites "${EVAL_SUITES}" \
     --device cpu \
     --torch-threads "${TORCH_THREADS}" \
     --torch-interop-threads 1 \

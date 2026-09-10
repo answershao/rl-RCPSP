@@ -119,6 +119,30 @@ class RcpspEnvTest(unittest.TestCase):
         }
         self.assertEqual(env.schedule, generate_schedule(instance, priority_map))
 
+    def test_incremental_resource_profile_matches_full_recomputation(self) -> None:
+        env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
+        observation, _ = env.reset(seed=29)
+        rng = np.random.default_rng(29)
+        terminated = False
+        while not terminated:
+            eligible = np.flatnonzero(observation["eligible_mask"])
+            action = int(rng.choice(eligible))
+            observation, _, terminated, _, _ = env.step(action)
+
+            normalized_usage = env._state.usage[: env.horizon].astype(np.float32)
+            normalized_usage /= env._capacity_scale[None, :]
+            expected = np.zeros_like(observation["resource_profile"])
+            expected = expected.reshape(env.resource_count, 2, 16)
+            for bin_index, (start, stop) in enumerate(env._resource_profile_ranges):
+                values = normalized_usage[start:stop]
+                expected[:, 0, bin_index] = values.mean(axis=0)
+                expected[:, 1, bin_index] = values.max(axis=0)
+            np.testing.assert_allclose(
+                observation["resource_profile"].reshape(env.resource_count, 2, 16),
+                expected,
+                atol=1e-7,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

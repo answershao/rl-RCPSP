@@ -26,7 +26,12 @@ from src.envs.rcpsp_env import RCPSPEnv
 from src.envs.sb3_env import make_sb3_env
 from src.training.environments import make_multi_env, make_single_env, make_vector_env
 from src.training.callbacks import TERMINAL_METRICS, RCPSPMetricsCallback
-from src.training.features import _aggregate_edge_messages, _edge_degrees
+from src.training.features import (
+    _aggregate_compact_edge_messages,
+    _aggregate_edge_messages,
+    _compact_edge_indices,
+    _edge_degrees,
+)
 from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import (
     create_ppo,
@@ -126,7 +131,7 @@ class Sb3Test(unittest.TestCase):
     def test_edge_messages_are_averaged_over_neighbours_not_summed(self):
         # Node 3 has two predecessors, so its message must be their mean.  A sum
         # would double the magnitude and grow with in-degree, which is what
-        # makes dense RG300 graphs explode.
+        # makes high-degree graphs unstable.
         embeddings = torch.tensor(
             [[[1.0, 2.0], [3.0, 5.0], [7.0, 11.0], [0.0, 0.0]]]
         )
@@ -147,6 +152,45 @@ class Sb3Test(unittest.TestCase):
         # An isolated node has no neighbours; the clamp must keep it at zero
         # instead of dividing by zero.
         torch.testing.assert_close(predecessors[0, 0], torch.zeros(2))
+
+    def test_unpadded_edge_aggregation_matches_padded_forward_and_gradient(self):
+        embeddings = torch.randn(3, 5, 4, requires_grad=True)
+        edge_sources = torch.tensor(
+            [[0, 1, 0, 0], [0, 2, 3, 0], [1, 0, 0, 0]]
+        )
+        edge_targets = torch.tensor(
+            [[1, 2, 0, 0], [2, 3, 4, 0], [4, 0, 0, 0]]
+        )
+        edge_mask = torch.tensor(
+            [[True, True, False, False], [True, True, True, False], [True, False, False, False]]
+        )
+        in_degree, out_degree = _edge_degrees(
+            edge_sources, edge_targets, edge_mask, 5, embeddings.dtype
+        )
+        padded = _aggregate_edge_messages(
+            embeddings,
+            edge_sources,
+            edge_targets,
+            edge_mask,
+            in_degree,
+            out_degree,
+        )
+        flat_sources, flat_targets = _compact_edge_indices(
+            edge_sources, edge_targets, edge_mask, 5
+        )
+        compact = _aggregate_compact_edge_messages(
+            embeddings, flat_sources, flat_targets, in_degree, out_degree
+        )
+        torch.testing.assert_close(compact[0], padded[0])
+        torch.testing.assert_close(compact[1], padded[1])
+
+        padded_gradient = torch.autograd.grad(
+            padded[0].sum() + padded[1].sum(), embeddings, retain_graph=True
+        )[0]
+        compact_gradient = torch.autograd.grad(
+            compact[0].sum() + compact[1].sum(), embeddings
+        )[0]
+        torch.testing.assert_close(compact_gradient, padded_gradient)
 
     def test_reference_rules_are_loaded_by_unique_instance_id(self):
         with TemporaryDirectory() as directory:

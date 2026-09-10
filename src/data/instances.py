@@ -6,10 +6,9 @@ by ``scripts/generate_pool.py``) and parse instances through the unified
 the same data representation (and the same serial SGS decoder) as the
 priority-rule / GA / GPHH baselines.
 
-Instance *names* are the data-root-relative path without its extension (e.g.
-``oras/RCPSP/RG30/Set 5/Pat80``).  File stems collide across the RG30 ``Set``
-directories, and the PPO static graph cache requires unique names, so plain
-``Path.stem`` is not usable here.
+Instance *names* are the data-root-relative path without its extension. The PPO
+static graph cache requires globally unique names, so plain ``Path.stem`` is
+not used for protocol entries.
 """
 from __future__ import annotations
 
@@ -47,15 +46,13 @@ def read_protocol(splits_path: str | Path) -> dict:
     Returns ``{"train": [...], "validation": [...], "evaluation": {suite: [...]}}``
     where every path is data-root-relative and posix-normalised.
 
-    Split keys are ``train`` / ``validation``; the historical key names
-    ``rg30_train`` / ``rg30_validation`` (when RG30 was the training pool) are
-    still accepted so older manifests keep loading.
+    Split keys are ``train`` / ``validation``.
     """
     doc = json.loads(Path(splits_path).read_text())
     splits = doc["splits"]
     evaluation = doc["evaluation"]
-    train = splits.get("train") or splits.get("rg30_train")
-    validation = splits.get("validation") or splits.get("rg30_validation")
+    train = splits.get("train")
+    validation = splits.get("validation")
     if not train or not validation:
         raise ValueError(f"{splits_path}: missing train / validation splits")
     if not evaluation:

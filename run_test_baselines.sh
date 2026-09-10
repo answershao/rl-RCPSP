@@ -36,8 +36,7 @@ DATA_ROOT="${DATA_ROOT:-data}"
 SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
 BKS_JSON="${BKS_JSON:-data/bks/bks_psplib.json}"
 SEED="${SEED:-17}"
-# test suites per the agreed protocol: PSPLIB only (rg300/patterson are optional
-# generalization references, not part of the main test)
+# Test suites per the agreed protocol: held-out PSPLIB only.
 SUITES="${SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 
 RUN_STATS="${RUN_STATS:-1}"
@@ -55,8 +54,8 @@ PPO_SUMMARY="${PPO_SUMMARY:-outputs/experiments/ppo/ppo_rcpsp/ppo_eval_summary.c
 MAX_INSTANCES="${SMOKE_MAX_INSTANCES:-0}"
 
 RULES_WORKERS="${RULES_WORKERS:-8}"
-GA_WORKERS="${GA_WORKERS:-8}"
-GPHH_WORKERS="${GPHH_WORKERS:-6}"
+GA_WORKERS="${GA_WORKERS:-32}"
+GPHH_WORKERS="${GPHH_WORKERS:-32}"
 GA_POPULATION="${GA_POPULATION:-50}"
 GA_GENERATIONS="${GA_GENERATIONS:-200}"
 GPHH_TRAIN_INSTANCES="${GPHH_TRAIN_INSTANCES:-40}"

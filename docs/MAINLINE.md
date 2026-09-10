@@ -20,18 +20,17 @@ cd /path/to/rl-RCPSP                  # 所有命令都在仓库根执行（脚�
 |---|---|---|
 | `data/bks/bks_psplib.json` | `python -m scripts.extract_bks` | S6 的 BKS 输入（PSPLIB sheet 160 个 UB 类列取 min 合成） |
 | `data/psplib/`（2040 `.sm`） | PSPLIB 原始数据 | 主测试集，训练期不可见 |
-| `data/oras/RCPSP/{RG30,RG300,Patterson}` | ORAS 原始数据 | RG30=历史训练池；RG300/Patterson=可选泛化参考 |
 | `splits.json` | S1 的 manifest 拷贝 | **唯一切分清单**，所有入口只读它取数 |
 
 当前协议（`splits.json`）实况：
 
 ```json
 { "mode": "psp-grid", "seed": 20260910, "replicates": {"30":8,"60":4,"90":2,"120":1},
-  "validation_fraction": 0.2, "widen": true, "cells": 336,
-  "counts": { "train": 1148, "validation": 68,
-              "train_by_size": {"n30":624,"n60":304,"n90":144,"n120":76} },
+  "validation_per_size": 32, "validation_strategy": "stratified_rf_rs_nc_per_size", "cells": 336,
+  "counts": { "train": 1088, "validation": 128,
+              "train_by_size": {"n30":608,"n60":288,"n90":128,"n120":64} },
   "evaluation": { "psplib_j30":480, "psplib_j60":480, "psplib_j90":480,
-                  "psplib_j120":600, "rg300":480, "patterson":110 } }
+                  "psplib_j120":600 } }
 ```
 
 ---
@@ -67,8 +66,8 @@ S2 协议诊断        S3 训练池参照规则      S4 test 侧基线
 ### S0 —— 环境自检
 
 ```bash
-python -m pytest -q -W error            # 期望 65 passed（≈40s 快测）
-python -m pytest -m slow                # 可选：4430 全语料解析回归（≈4min）
+python -m pytest -q -W error -m 'not slow'  # 期望 64 passed, 1 deselected（≈40s 快测）
+python -m pytest -m slow                # 可选：3256 个主协议实例解析回归
 ```
 
 | 项 | 内容 |
@@ -84,7 +83,7 @@ python -m pytest -m slow                # 可选：4430 全语料解析回归（
 python -m scripts.generate_pool \
   --mode psp-grid \
   --replicates 8,4,2,1 \
-  --validation-fraction 0.2 \
+  --validation-per-size 32 \
   --widen \
   --workers 8 \
   --output data/generated/psp_grid_bal \
@@ -97,11 +96,12 @@ cp data/generated/psp_grid_bal.json splits.json    # manifest 即协议
 |---|---|
 | 输入 | `src/data/generator.py` + `scripts/psplib_design.py`（读 RCLIB xlsx 的 `All` sheet 名义因子网格）+ **当前 `splits.json`**（`--splits`，其 `evaluation` 组会被原样搬到新 manifest） |
 | 产物 | `data/generated/psp_grid_bal/{n30,n60,n90,n120}/*.rcp`（1216 个）+ `psp_grid_bal.json`（manifest）+ `psp_grid_bal.specs.json`（生成参数留档） |
-| 通过判据 | `counts.train=1148`、`counts.validation=68`、`cells=336` |
+| 通过判据 | `counts.train=1088`、`counts.validation=128`、每种规模 32 个 validation、`cells=336` |
 | 何时跳过 | 协议不变就**不要重跑**（seed 20260910 可复现；重跑会得到同一批实例） |
 | 常见失败 | ① `--replicates` 写成 4 个值的列表时必须对应 n=30/60/90/120 升序；② `--widen` 关掉会让基准格子落在训练包络边界上而不是内部点 |
 
 参数含义：`--replicates` 单值=各规模同配额，列表=按规模配平（单实例决策状态成本 ≈n²，故 8/4/2/1 让各规模训练预算接近）；
+`--validation-per-size 32` 在每种规模选择 32 个参数单元，并对 RF/RS/NC 做确定性分层；每个入选单元只把最后一个副本留作验证；
 `--widen` 每个轴向外扩一步，使 PSPLIB 的基准格子成为训练包络的**内部点**；
 `--mode random` 是另一条路（坐标均匀采样 = domain randomization），不覆盖 PSPLIB 分布，主线上不用。
 
@@ -134,7 +134,7 @@ python -m scripts.baselines --data-root data --instance-workers 8 \
 |---|---|
 | 输入 | `psp_grid` 套件（`scripts/common.py::SUITE_SPECS` 已登记 → `data/generated/psp_grid_bal`）+ `splits.json` |
 | 产物 | rules CSV（30 列，25 个 makespan 方法列），覆盖 train+validation 全部 1216 个生成实例 |
-| 通过判据 | 文件存在，且 `file` 列能覆盖 `splits.json` 的 **68 个 validation** 实例 |
+| 通过判据 | 文件存在，且 `file` 列能覆盖 `splits.json` 的 **128 个 validation** 实例 |
 | 何时跳过 | 生成池或规则实现不变时可复用 |
 | 常见失败 | ① 覆盖不全 → S5 抛 `--ref-rules does not cover N validation instances`；② instance_id 口径不一致（必须是数据根相对路径去扩展名） |
 
@@ -164,14 +164,14 @@ python -m scripts.run_gphh --data-root data --splits splits.json --train-instanc
 | 耗时 | 规则=秒级；GA=小时级（50×200×实例数，**最慢的一步，别误重跑**）；GPHH 演化慢，默认在一键脚本里关闭 |
 | 常见失败 | `--max-instances 0`（默认）才是全量；误传小值会静默只跑前 N 个 |
 
-`run_gphh --eval-suites` 默认值是 `EVALUATION_SUITES`（role=`final-evaluation` 的 6 个套件）——
+`run_gphh --eval-suites` 默认值是四个 PSPLIB `EVALUATION_SUITES`——
 **任何训练池都不会进评测默认值**，避免"在拟合唱片上评测"。
 
 ### S5 —— PPO 训练
 
 ```bash
 # 先在本机实测最优 batch / 线程（不要再套用别的机器的结论）
-python -m scripts.bench_ppo --caps 122 302 --threads 8 16 20 --batch-sizes 512 1024 4096
+python -m scripts.bench_ppo --caps 122 --threads 8 16 20 --batch-sizes 512 1024 4096
 
 # CPU 机（后台 nohup；WAIT_FOR_TRAINING=1 可前台等待）
 bash train_cpu.sh
@@ -190,11 +190,7 @@ bash train_a800.sh
 `TOTAL_TIMESTEPS`（默认 1e7）、`SEED`（默认 17）、`EVAL_ALL=1`（训练后顺带评全部 evaluation 组）、
 `N_ENVS/N_STEPS/BATCH_SIZE/N_EPOCHS/TORCH_THREADS`。
 
-关键口径：默认 `TRAIN_MAX_ACTIVITIES=auto` —— 训练图取训练池最大活动数（当前池 → 122），
-保存前用 `widen_policy` 把权重迁到全局 cap 302。**函数等价 ≠ 训练等价**：动作空间是
-`Discrete(max_activities)`，`multinomial` 的 RNG 消耗随类别数变化，随机 rollout 会分叉；
-所以 "cap=122 训一次" 与 "cap=302 训一次" 是两次独立训练（只能当 A/B 对照），
-而 `widen_policy` 前后用 `evaluate_paths`（本就是 `deterministic=True`）比对应逐实例一致。
+关键口径：generated 训练/验证和 PSPLIB 测试统一使用 122 节点 cap，不执行模型扩宽。
 
 ### S6 —— 汇总出表
 
@@ -257,7 +253,7 @@ python -m pytest -q -W error
 
 # S1 训练池 + 协议（协议不变则跳过；manifest 即协议）
 python -m scripts.generate_pool --mode psp-grid --replicates 8,4,2,1 \
-  --validation-fraction 0.2 --widen --workers 8 \
+  --validation-per-size 32 --widen --workers 8 \
   --output data/generated/psp_grid_bal --manifest data/generated/psp_grid_bal.json
 cp data/generated/psp_grid_bal.json splits.json
 
@@ -278,7 +274,7 @@ python -m scripts.run_gphh --data-root data --splits splits.json --train-instanc
   --seed 17 --eval-suites "$SUITES" --eval-workers 8 --output-dir outputs/gphh_psplib/v1
 
 # S5 PPO
-python -m scripts.bench_ppo --caps 122 302 --threads 8 16 20 --batch-sizes 512 1024 4096
+python -m scripts.bench_ppo --caps 122 --threads 8 16 20 --batch-sizes 512 1024 4096
 WAIT_FOR_TRAINING=1 bash train_cpu.sh          # 或 bash train_a800.sh
 
 # S6 汇总（PPO 训完后带上 --ppo 重跑）

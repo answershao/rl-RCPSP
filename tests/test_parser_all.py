@@ -1,4 +1,4 @@
-"""Full-corpus (4430) parse + structural sanity — slow integration test."""
+"""Main-protocol corpus parse and structural sanity integration test."""
 
 import time
 
@@ -6,12 +6,12 @@ import pytest
 
 from src.data.parsers import load_instance
 
-EXPECTED_COUNT = 4430  # 2040 .sm (PSPLIB j30-j120) + 2390 .rcp (RG30/RG300/Patterson)
+EXPECTED_COUNT = 3256  # 2040 PSPLIB test + 1216 generated train/validation
 
 
 def _corpus_files(repo_root):
     sm = sorted((repo_root / "data/psplib").glob("**/*.sm"))
-    rcp = sorted((repo_root / "data/oras").glob("**/*.rcp"))
+    rcp = sorted((repo_root / "data/generated/psp_grid_bal").glob("**/*.rcp"))
     return sm + rcp
 
 

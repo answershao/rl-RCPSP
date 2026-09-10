@@ -12,6 +12,7 @@ rediscovered.  See docs/EXECUTION_FLOW.md S3.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 from scripts.common import (
@@ -45,9 +46,13 @@ def test_evaluation_suites_exclude_every_training_pool() -> None:
     # the very instances the method was fitted to.
     roles = {SUITE_SPECS[suite][2] for suite in EVALUATION_SUITES}
     assert "training-pool" not in roles
-    assert "historical-training-pool" not in roles
     assert TRAINING_POOL not in EVALUATION_SUITES
-    assert "rg30" not in EVALUATION_SUITES
+    assert EVALUATION_SUITES == (
+        "psplib_j30",
+        "psplib_j60",
+        "psplib_j90",
+        "psplib_j120",
+    )
 
 
 def test_training_pool_directory_covers_the_validation_split() -> None:
@@ -62,3 +67,33 @@ def test_training_pool_directory_covers_the_validation_split() -> None:
         f"{len(outside)}/{len(validation)} validation instances live outside "
         f"{prefix}; train_ppo's --ref-rules could never cover them, e.g. {outside[:2]}"
     )
+
+
+def test_generated_validation_split_is_parameter_stratified() -> None:
+    manifest = json.loads((REPO_ROOT / "splits.json").read_text())
+    assert manifest["validation_per_size"] == 32
+    assert manifest["validation_strategy"] == "stratified_rf_rs_nc_per_size"
+    specs = json.loads(
+        (REPO_ROOT / "data/generated/psp_grid_bal.specs.json").read_text()
+    )
+    paths_by_split = {
+        split: {entry["file"] for entry in specs if entry["split"] == split}
+        for split in ("train", "validation")
+    }
+    assert paths_by_split == {
+        split: set(manifest["splits"][split]) for split in paths_by_split
+    }
+    assert {split: len(paths) for split, paths in paths_by_split.items()} == {
+        "train": 1088,
+        "validation": 128,
+    }
+
+    for size in (30, 60, 90, 120):
+        all_at_size = [entry for entry in specs if entry["nominal"]["n"] == size]
+        held_out = [entry for entry in all_at_size if entry["split"] == "validation"]
+        assert len(held_out) == 32
+        for axis in ("RF", "RS", "NC"):
+            all_levels = {entry["nominal"][axis] for entry in all_at_size}
+            counts = Counter(entry["nominal"][axis] for entry in held_out)
+            assert set(counts) == all_levels
+            assert max(counts.values()) - min(counts.values()) <= 1

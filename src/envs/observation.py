@@ -2,27 +2,25 @@
 
 Observations target single-project RCPSP instances (0-indexed activity ids)
 produced by ``src.data.adapter``; padded multi-instance environments keep
-the shapes fixed across the j30-j120 / RG300 activity range.
+shapes fixed across the j30-j120 activity range.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property, lru_cache
 
 import numpy as np
 
 from src.core.rcpsp import Instance
 
 
-# Upper bound over per-activity successor counts across the whole single-project
-# corpus.  PSPLIB j30-j120 fan out to at most 24, RG30 reaches 25 and the large
-# RG300 generalization set reaches 89, so the policy-side successor tensor needs
-# this headroom to keep one model valid across every suite.
-MAX_SUCCESSORS = 96
-# The same scan puts the worst in-degree at 91 (RG300), so both directions share
-# the 96 headroom and the two degree features stay on a comparable scale.
-MAX_PREDECESSORS = 96
+# Full-corpus bounds over the generated train/validation pool and held-out
+# PSPLIB j30-j120 suites are 19 successors and 18 predecessors. One spare slot
+# keeps the cache contract explicit while avoiding oversized edge tensors.
+MAX_SUCCESSORS = 20
+MAX_PREDECESSORS = 20
 RESOURCE_PROFILE_BIN_COUNT = 16
 RESOURCE_PROFILE_CHANNEL_COUNT = 2
 RESOURCE_PROFILE_FEATURE_COUNT = (
@@ -50,22 +48,22 @@ class ObservationLayout:
         if min(self.max_activities, self.max_resources) < 1:
             raise ValueError("observation dimensions must be positive")
 
-    @property
+    @cached_property
     def activity_status(self) -> slice:
         return slice(0, self.max_activities)
 
-    @property
+    @cached_property
     def precedence_satisfied(self) -> slice:
         return slice(self.activity_status.stop, self.activity_status.stop + self.max_activities)
 
-    @property
+    @cached_property
     def eligible_mask(self) -> slice:
         return slice(
             self.precedence_satisfied.stop,
             self.precedence_satisfied.stop + self.max_activities,
         )
 
-    @property
+    @cached_property
     def dynamic_activity_features(self) -> slice:
         return slice(
             self.eligible_mask.stop,
@@ -73,14 +71,14 @@ class ObservationLayout:
             + self.max_activities * DYNAMIC_ACTIVITY_FEATURE_COUNT,
         )
 
-    @property
+    @cached_property
     def remaining_capacity(self) -> slice:
         return slice(
             self.dynamic_activity_features.stop,
             self.dynamic_activity_features.stop + self.max_resources,
         )
 
-    @property
+    @cached_property
     def resource_profile(self) -> slice:
         return slice(
             self.remaining_capacity.stop,
@@ -88,21 +86,27 @@ class ObservationLayout:
             + self.max_resources * RESOURCE_PROFILE_FEATURE_COUNT,
         )
 
-    @property
+    @cached_property
     def current_time(self) -> int:
         return self.resource_profile.stop
 
-    @property
+    @cached_property
     def global_features(self) -> slice:
         return slice(self.remaining_capacity.start, self.current_time + 1)
 
-    @property
+    @cached_property
     def instance_index(self) -> int:
         return self.current_time + 1
 
-    @property
+    @cached_property
     def size(self) -> int:
         return self.instance_index + 1
+
+
+@lru_cache(maxsize=None)
+def observation_layout(max_activities: int, max_resources: int) -> ObservationLayout:
+    """Reuse immutable slice metadata on the per-environment-step hot path."""
+    return ObservationLayout(max_activities, max_resources)
 
 
 @dataclass(frozen=True)
@@ -252,7 +256,7 @@ def flatten_observation(
     if catalog_size < 1 or not 0 <= instance_index < catalog_size:
         raise ValueError("instance_index must identify an entry in the static catalog")
 
-    layout = ObservationLayout(max_activities, max_resources)
+    layout = observation_layout(max_activities, max_resources)
     if out is None:
         result = np.zeros(layout.size, dtype=np.float32)
     else:
@@ -324,4 +328,4 @@ def flatten_observation(
 
 def observation_size(activity_count: int, resource_count: int) -> int:
     """Return the compact dynamic observation length."""
-    return ObservationLayout(activity_count, resource_count).size
+    return observation_layout(activity_count, resource_count).size
