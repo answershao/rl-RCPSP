@@ -149,8 +149,9 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         *,
         max_activities: int,
         max_resources: int,
+        max_horizon: int,
         static_cache: StaticGraphCache,
-        max_successors: int = 3,
+        max_successors: int = 20,
         gin_layers: int = 3,
         embedding_dim: int = 32,
         hidden_dim: int = 64,
@@ -159,7 +160,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
     ) -> None:
         if gin_layers < 1:
             raise ValueError("gin_layers must be positive")
-        self.layout = ObservationLayout(max_activities, max_resources)
+        self.layout = ObservationLayout(max_activities, max_resources, max_horizon)
         if observation_space.shape != (self.layout.size,):
             raise ValueError(
                 f"expected flattened RCPSP observation {(self.layout.size,)}, "
@@ -169,6 +170,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim)
         self.max_activities = max_activities
         self.max_resources = max_resources
+        self.max_horizon = max_horizon
         self.max_successors = max_successors
         self.embedding_dim = embedding_dim
         self.global_dim = global_dim
@@ -180,9 +182,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             nn.Linear(global_input_dim, global_dim),
             nn.ReLU(),
         )
-        activity_input_dim = (
-            9 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
-        )
+        activity_input_dim = 12 + DYNAMIC_ACTIVITY_FEATURE_COUNT + max_resources + global_dim
         self.activity_encoder = nn.Sequential(
             nn.Linear(activity_input_dim, hidden_dim),
             nn.ReLU(),
@@ -290,6 +290,9 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         status = observations[:, layout.activity_status]
         precedence = observations[:, layout.precedence_satisfied]
         eligible = observations[:, layout.eligible_mask]
+        remaining_predecessors = observations[:, layout.remaining_predecessors]
+        start_times = observations[:, layout.scheduled_start_times]
+        finish_times = observations[:, layout.scheduled_finish_times]
         dynamic = observations[:, layout.dynamic_activity_features].reshape(
             -1, n, DYNAMIC_ACTIVITY_FEATURE_COUNT
         )
@@ -307,23 +310,22 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         global_embedding = self.global_encoder(observations[:, layout.global_features])
 
         global_by_activity = global_embedding.unsqueeze(1).expand(-1, n, -1)
-        activity_features = th.cat(
-            [
-                status.unsqueeze(-1),
-                precedence.unsqueeze(-1),
-                durations.unsqueeze(-1),
-                eligible.unsqueeze(-1),
-                successor_counts.unsqueeze(-1),
-                predecessor_counts.unsqueeze(-1),
-                downstream_durations.unsqueeze(-1),
-                slack_ratios.unsqueeze(-1),
-                on_critical_path.unsqueeze(-1),
-                demands,
-                dynamic,
-                global_by_activity,
-            ],
-            dim=-1,
-        )
+        activity_feature_parts = [
+            status.unsqueeze(-1),
+            precedence.unsqueeze(-1),
+            remaining_predecessors.unsqueeze(-1),
+            start_times.unsqueeze(-1),
+            finish_times.unsqueeze(-1),
+            durations.unsqueeze(-1),
+            eligible.unsqueeze(-1),
+            successor_counts.unsqueeze(-1),
+            predecessor_counts.unsqueeze(-1),
+            downstream_durations.unsqueeze(-1),
+            slack_ratios.unsqueeze(-1),
+            on_critical_path.unsqueeze(-1),
+        ]
+        activity_feature_parts.extend([demands, dynamic, global_by_activity])
+        activity_features = th.cat(activity_feature_parts, dim=-1)
         embeddings = self.activity_encoder(activity_features)
         valid_nodes = activity_mask.unsqueeze(-1)
         embeddings = embeddings * valid_nodes

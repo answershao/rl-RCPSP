@@ -13,14 +13,15 @@ graph uses one activity/resource cap across training, validation and test. The
 main protocol has 30-120 real activities plus dummy source/sink nodes, so its
 activity cap is 122.
 
-Evaluation writes ``ppo_eval_summary.csv`` with columns
-``suite,file,n_activities,n_resources,ppo_makespan``, consumable by
+Evaluation writes ``ppo_eval_summary.csv`` with PPO, serial-LST, BKS, and
+per-instance BKS-gap columns, consumable by
 ``scripts/aggregate_results.py --ppo`` for the BKS-gap comparison table.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 from functools import partial
 from pathlib import Path
 import shutil
@@ -141,6 +142,16 @@ def parse_args() -> argparse.Namespace:
         help="column of --ref-rules used for the validation relative gap",
     )
     parser.add_argument(
+        "--eval-ref-rules", type=Path,
+        default=Path("outputs/rules_psplib/makespan_summary.csv"),
+        help="baselines.py CSV for evaluation suites; used for serial_LST "
+             "comparison and BKS gaps",
+    )
+    parser.add_argument(
+        "--bks", type=Path, default=Path("data/bks/bks_psplib.json"),
+        help="JSON mapping PSPLIB filenames to best-known solutions",
+    )
+    parser.add_argument(
         "--eval-suites", default="",
         help="comma-separated evaluation group ids evaluated after training "
              "(from splits.json 'evaluation'); empty skips post-training evaluation",
@@ -162,8 +173,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evaluate-only", action="store_true",
-        help="Skip training and evaluate output-dir/final_model.zip on every "
-             "evaluation group (or the --eval-suites subset).",
+        help="Skip training and evaluate the selected checkpoint on every "
+             "evaluation group (or the --eval-suites subset). By default, "
+             "use output-dir/checkpoints/best_model.zip.",
+    )
+    parser.add_argument(
+        "--model-path", type=Path, default=None,
+        help="checkpoint to load with --evaluate-only; relative paths are "
+             "resolved against --output-dir",
     )
     return parser.parse_args()
 
@@ -255,14 +272,41 @@ def load_reference_rules(path: Path, column: str) -> dict[str, int]:
     return refs
 
 
-def scan_caps(loader, rels: list[str]) -> tuple[int, int]:
+def load_bks(path: Path) -> dict[str, int]:
+    """Load BKS values keyed by lower-case PSPLIB filename."""
+    if not path.is_file():
+        raise FileNotFoundError(f"--bks not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw_instances = payload["instances"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"{path} must contain an 'instances' mapping") from exc
+    if not isinstance(raw_instances, dict):
+        raise ValueError(f"{path} field 'instances' must be an object")
+    bks: dict[str, int] = {}
+    for raw_name, raw_value in raw_instances.items():
+        try:
+            value = int(float(raw_value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}: invalid BKS for {raw_name!r}") from exc
+        if value <= 0:
+            raise ValueError(f"{path}: BKS must be positive for {raw_name!r}")
+        bks[Path(raw_name).name.lower()] = value
+    return bks
+
+
+def scan_caps(loader, rels: list[str]) -> tuple[int, int, int]:
     """Resolve global caps over one set of instances (loads are not retained)."""
-    max_activities = max_resources = 0
+    max_activities = max_resources = max_horizon = 0
     for rel in rels:
         instance = loader(rel)
         max_activities = max(max_activities, len(instance.activities))
         max_resources = max(max_resources, instance.resource_count)
-    return max_activities, max_resources
+        max_horizon = max(
+            max_horizon,
+            sum(activity.duration for activity in instance.activities.values()),
+        )
+    return max_activities, max_resources, max_horizon
 
 
 def evaluate_suites_and_write(
@@ -276,11 +320,14 @@ def evaluate_suites_and_write(
     output_dir: Path,
     eval_batch_size: int,
     max_eval_instances: int,
+    evaluation_rules: dict[str, int] | None = None,
+    bks: dict[str, int] | None = None,
 ) -> Path:
     """Evaluate the deterministic policy over several suites and write one CSV.
 
-    Columns are aligned with the baseline runners: ``suite``, ``file`` (unique
-    data-root-relative path), ``n_activities``, ``n_resources``, ``ppo_makespan``.
+    Columns are aligned with the baseline runners. When evaluation references
+    are supplied, ``serial_LST``, ``bks``, ``gap_serial_LST``, and
+    ``gap_ppo_makespan`` are added; gaps are percentages relative to BKS.
     """
     result_path = output_dir / "ppo_eval_summary.csv"
     rows: list[dict] = []
@@ -294,20 +341,54 @@ def evaluate_suites_and_write(
                                       loader=loader, name_fn=name_fn))
         for rel in rels:
             instance = loader(rel)
-            rows.append({
+            row = {
                 "suite": suite,
                 "file": rel,
                 "n_activities": len(instance.activities),
                 "n_resources": instance.resource_count,
                 "ppo_makespan": int(results[instance_id(rel)]),
-            })
+            }
+            if evaluation_rules is not None or bks is not None:
+                if evaluation_rules is None or bks is None:
+                    raise ValueError(
+                        "evaluation_rules and bks must be supplied together"
+                    )
+                key = instance_id(rel)
+                bks_key = Path(rel).name.lower()
+                if key not in evaluation_rules:
+                    raise ValueError(f"evaluation rules do not cover {rel}")
+                if bks_key not in bks:
+                    raise ValueError(f"BKS does not cover {rel}")
+                lst = evaluation_rules[key]
+                best_known = bks[bks_key]
+                row.update({
+                    "serial_LST": lst,
+                    "bks": best_known,
+                    "gap_serial_LST": round(
+                        100.0 * (lst - best_known) / best_known, 2
+                    ),
+                    "gap_ppo_makespan": round(
+                        100.0 * (row["ppo_makespan"] - best_known) / best_known, 2
+                    ),
+                })
+            rows.append(row)
         mean = float(np.mean([int(r["ppo_makespan"]) for r in rows if r["suite"] == suite]))
         print(f"{suite} (n={len(rels)}): mean ppo_makespan={mean:.2f}")
+        if evaluation_rules is not None:
+            suite_rows = [r for r in rows if r["suite"] == suite]
+            print(
+                f"{suite} (n={len(rels)}): mean gap PPO="
+                f"{np.mean([r['gap_ppo_makespan'] for r in suite_rows]):+.2f}%; "
+                f"serial_LST={np.mean([r['gap_serial_LST'] for r in suite_rows]):+.2f}%"
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     with result_path.open("w", newline="") as fh:
-        writer = csv.DictWriter(
-            fh, fieldnames=["suite", "file", "n_activities", "n_resources", "ppo_makespan"]
-        )
+        fieldnames = ["suite", "file", "n_activities", "n_resources", "ppo_makespan"]
+        if evaluation_rules is not None:
+            fieldnames += [
+                "serial_LST", "bks", "gap_serial_LST", "gap_ppo_makespan"
+            ]
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
     print(f"ppo evaluation summary: {result_path}")
@@ -399,9 +480,41 @@ def main() -> None:
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "final_model.zip"
+
+    evaluation_rules = None
+    evaluation_bks = None
+    if eval_rels:
+        evaluation_rules = load_reference_rules(
+            args.eval_ref_rules, "serial_LST"
+        )
+        evaluation_bks = load_bks(args.bks)
+        missing_rules = [
+            rel
+            for rels in eval_rels.values()
+            for rel in rels
+            if instance_id(rel) not in evaluation_rules
+        ]
+        missing_bks = [
+            rel
+            for rels in eval_rels.values()
+            for rel in rels
+            if Path(rel).name.lower() not in evaluation_bks
+        ]
+        if missing_rules:
+            raise ValueError(
+                f"--eval-ref-rules does not cover {len(missing_rules)} evaluation "
+                f"instances; first missing: {missing_rules[0]}"
+            )
+        if missing_bks:
+            raise ValueError(
+                f"--bks does not cover {len(missing_bks)} evaluation instances; "
+                f"first missing: {missing_bks[0]}"
+            )
 
     if args.evaluate_only:
+        model_path = args.model_path or Path("checkpoints/best_model.zip")
+        if not model_path.is_absolute():
+            model_path = output_dir / model_path
         if not model_path.is_file():
             raise FileNotFoundError(f"PPO model not found: {model_path}")
         model = PPO.load(str(model_path), device=args.device)
@@ -409,6 +522,7 @@ def main() -> None:
         reference_env = SimpleNamespace(
             max_activities=extractor.max_activities,
             max_resources=extractor.max_resources,
+            max_horizon=extractor.max_horizon,
         )
         if not eval_rels:
             raise ValueError("--evaluate-only requires --eval-suites or defaults to all")
@@ -417,6 +531,8 @@ def main() -> None:
             seed=args.seed, output_dir=output_dir,
             eval_batch_size=args.eval_batch_size,
             max_eval_instances=args.eval_max_instances,
+            evaluation_rules=evaluation_rules,
+            bks=evaluation_bks,
         )
         return
 
@@ -424,13 +540,22 @@ def main() -> None:
         raise ValueError(f"--n-envs ({args.n_envs}) exceeds training instances ({len(train_rels)})")
 
     if args.max_activities is None or args.max_resources is None:
-        scanned_activities, scanned_resources = scan_caps(loader, participating)
+        scanned_activities, scanned_resources, scanned_horizon = scan_caps(loader, participating)
         max_activities = args.max_activities or scanned_activities
         max_resources = args.max_resources or scanned_resources
-        print(f"resolved caps by scan: activities={max_activities} resources={max_resources}")
+        max_horizon = scanned_horizon
+        print(
+            f"resolved caps by scan: activities={max_activities} "
+            f"resources={max_resources} horizon={max_horizon}"
+        )
     else:
         max_activities, max_resources = args.max_activities, args.max_resources
-    reference_env = SimpleNamespace(max_activities=max_activities, max_resources=max_resources)
+        _, _, max_horizon = scan_caps(loader, participating)
+    reference_env = SimpleNamespace(
+        max_activities=max_activities,
+        max_resources=max_resources,
+        max_horizon=max_horizon,
+    )
 
     reference_rules = load_reference_rules(args.ref_rules, args.ref_rule)
     missing = [rel for rel in validation_rels if instance_id(rel) not in reference_rules]
@@ -447,7 +572,8 @@ def main() -> None:
         f"critical_path_shaping={args.critical_path_shaping}; "
         f"objective=makespan_only; caps=({max_activities},{max_resources}); "
         f"max_successors={MAX_SUCCESSORS}; "
-        f"obs_dim={observation_size(max_activities, max_resources)}"
+        f"state=exact; max_horizon={max_horizon}; "
+        f"obs_dim={observation_size(max_activities, max_resources, max_horizon)}"
     )
     if args.device.startswith("cuda"):
         runtime += f"; gpu={torch.cuda.get_device_name(torch.device(args.device))}"
@@ -473,6 +599,7 @@ def main() -> None:
             worker_paths,
             max_activities=max_activities,
             max_resources=max_resources,
+            max_horizon=max_horizon,
             instance_indices=worker_indices,
             catalog_size=len(train_rels),
             reward_shaping_coef=args.critical_path_shaping,
@@ -537,6 +664,8 @@ def main() -> None:
                 seed=args.seed, output_dir=output_dir,
                 eval_batch_size=args.eval_batch_size,
                 max_eval_instances=args.eval_max_instances,
+                evaluation_rules=evaluation_rules,
+                bks=evaluation_bks,
             )
     finally:
         env.close()

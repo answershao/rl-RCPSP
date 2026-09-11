@@ -242,8 +242,8 @@ ALLOW_OVERWRITE=1 bash run_test_baselines.sh                  # 重算（默认�
 | 命令 | 用途 | 前置 |
 |---|---|---|
 | `python -m scripts.extract_bks` | RCLIB xlsx → `data/bks/bks_psplib.json` | —（产物已入库） |
-| `bash eval_cpu.sh` | 仅评估已有模型（`MODEL_DIR` 指向 run 目录；默认评 `splits.json` 全部 evaluation 组） | S5 的 `final_model.zip`；**不需要 S3**（读参照规则之前就已 return） |
-| `bash search_cpu.sh` | 跨 seed 采样评估（模型须放 `outputs/experiments/ppo/seed<N>/final_model.zip`） | 多 seed 的 S5 + 覆盖所评组的参照规则 |
+| `bash eval_cpu.sh` | 仅评估已有模型（默认自动选择 `cpu_runs` 下最新且含 `checkpoints/best_model.zip` 的 run；`MODEL_DIR` 可覆盖；默认评 `splits.json` 全部 evaluation 组） | S5 的模型；**不需要 S3**（读参照规则之前就已 return） |
+| `bash search_cpu.sh` | 采样评估（默认自动选择最新 CPU run 的 `checkpoints/best_model.zip`；仍支持 `seed<N>` 显式布局） | 所选模型的搜索结果 + 覆盖所评组的参照规则 |
 | `python -m scripts.compare_ppo_results` | 两轮 PPO 的 `ppo_eval_summary.csv` 逐实例对比 | 两次 S5 |
 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | 单实例 Gantt + AON 图 | — |
 

@@ -13,9 +13,9 @@ export KMP_BLOCKTIME="${KMP_BLOCKTIME:-0}"
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
 export PYTHONUNBUFFERED=1
 
-MODELS_ROOT="${MODELS_ROOT:-outputs/experiments/ppo}"
-MODEL_FILE="${MODEL_FILE:-final_model.zip}"
-OUTPUT_DIR="${OUTPUT_DIR:-${MODELS_ROOT}/inference_search}"
+MODELS_ROOT="${MODELS_ROOT:-outputs/experiments/ppo/cpu_runs}"
+MODEL_FILE="${MODEL_FILE:-checkpoints/best_model.zip}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 SPLITS="${SPLITS:-splits.json}"
 DATA_ROOT="${DATA_ROOT:-data}"
 EVAL_GROUPS="${EVAL_GROUPS:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
@@ -41,11 +41,10 @@ if [[ -z "${MODELS_ROOT}" ]]; then
     exit 1
 fi
 for seed in "${SEED_ARGS[@]}"; do
-    model_path="${MODELS_ROOT}/seed${seed}/${MODEL_FILE}"
-    if [[ ! -f "${model_path}" ]]; then
-        echo "PPO model not found: ${model_path}" >&2
-        exit 1
-    fi
+    python -m scripts.ppo_runs \
+        --models-root "${MODELS_ROOT}" \
+        --model-file "${MODEL_FILE}" \
+        --seed "${seed}" >/dev/null
 done
 if [[ ! -f "${SPLITS}" ]]; then
     echo "protocol splits not found: ${SPLITS}" >&2
@@ -56,29 +55,35 @@ LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/logs/ppo/inference_search}"
 mkdir -p "${LOG_DIR}"
 SEARCH_LOG_FILE="${LOG_DIR}/search_$(date +%Y%m%d_%H%M%S).log"
 
+SEARCH_ARGS=(
+    --models-root "${MODELS_ROOT}"
+    --model-file "${MODEL_FILE}"
+    --seeds "${SEED_ARGS[@]}"
+    --splits "${SPLITS}"
+    --data-root "${DATA_ROOT}"
+    --eval-groups "${EVAL_GROUPS}"
+    --ref-rules "${REF_RULES}"
+    --ref-rule "${REF_RULE}"
+    --device cpu
+    --eval-batch-size "${EVAL_BATCH_SIZE}"
+    --eval-max-instances "${EVAL_MAX_INSTANCES}"
+    --workers "${WORKERS}"
+    --torch-threads "${TORCH_THREADS}"
+    --torch-interop-threads "${TORCH_INTEROP_THREADS}"
+    --evaluation-seed "${EVALUATION_SEED}"
+)
+if [[ -n "${OUTPUT_DIR}" ]]; then
+    SEARCH_ARGS+=(--output-dir "${OUTPUT_DIR}")
+fi
+
 nohup python -m scripts.search_ppo \
-    --models-root "${MODELS_ROOT}" \
-    --model-file "${MODEL_FILE}" \
-    --seeds "${SEED_ARGS[@]}" \
-    --splits "${SPLITS}" \
-    --data-root "${DATA_ROOT}" \
-    --eval-groups "${EVAL_GROUPS}" \
-    --ref-rules "${REF_RULES}" \
-    --ref-rule "${REF_RULE}" \
-    --output-dir "${OUTPUT_DIR}" \
-    --device cpu \
-    --eval-batch-size "${EVAL_BATCH_SIZE}" \
-    --eval-max-instances "${EVAL_MAX_INSTANCES}" \
-    --workers "${WORKERS}" \
-    --torch-threads "${TORCH_THREADS}" \
-    --torch-interop-threads "${TORCH_INTEROP_THREADS}" \
-    --evaluation-seed "${EVALUATION_SEED}" \
+    "${SEARCH_ARGS[@]}" \
     "$@" >"${SEARCH_LOG_FILE}" 2>&1 &
 
 SEARCH_PID=$!
 echo "inference search started in background: PID=${SEARCH_PID}"
 echo "log: ${SEARCH_LOG_FILE}"
-echo "results: ${OUTPUT_DIR}"
+echo "results: ${OUTPUT_DIR:-selected run/inference_search}"
 
 if [[ "${WAIT_FOR_SEARCH:-0}" == "1" ]]; then
     wait "${SEARCH_PID}"

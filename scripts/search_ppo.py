@@ -3,9 +3,8 @@
 
 This is the post-training inference search over the fixed RCPSP protocol:
 
-* checkpoint layout: ``<models-root>/seed<N>/<model-file>`` (one directory per
-  training seed, e.g. produced by running ``scripts/train_ppo.py`` with a
-  different ``--output-dir`` per seed);
+* checkpoint layouts: legacy ``<models-root>/seed<N>/<model-file>`` or the
+  newest timestamped CPU run ``<models-root>/cpu_YYYYMMDD_HHMMSS/<model-file>``;
 * evaluated instance groups come from ``splits.json`` (``validation`` plus
   any ``evaluation`` group such as ``psplib_j30``), shared by every seed;
 * instances load through ``src.data.adapter`` and names are the unique
@@ -35,6 +34,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.train_ppo import resolve_device
+from scripts.ppo_runs import resolve_model_path
 from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import (
     MAX_SAMPLE_TRAJECTORIES,
@@ -53,6 +53,7 @@ def _reference_env_for(model: PPO) -> SimpleNamespace:
     return SimpleNamespace(
         max_activities=extractor.max_activities,
         max_resources=extractor.max_resources,
+        max_horizon=extractor.max_horizon,
     )
 
 
@@ -174,16 +175,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models-root",
         type=Path,
-        default=Path("outputs/experiments/ppo"),
-        help="directory containing seedN/<model-file> checkpoints",
+        default=Path("outputs/experiments/ppo/cpu_runs"),
+        help="directory containing seedN/<model-file> or timestamped CPU runs",
     )
     parser.add_argument(
         "--model-file",
         type=Path,
-        default=Path("final_model.zip"),
-        help="checkpoint path relative to each seed directory",
+        default=Path("checkpoints/best_model.zip"),
+        help="checkpoint path relative to a seed or timestamped run directory",
     )
-    parser.add_argument("--seeds", nargs="+", type=int, default=[17, 23, 31])
+    parser.add_argument("--seeds", nargs="+", type=int, default=[17])
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument(
         "--splits", type=Path, default=Path("splits.json"),
@@ -209,7 +210,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/experiments/ppo/inference_search"),
+        default=None,
+        help="search output directory; defaults to the selected run/inference_search",
     )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
@@ -514,12 +516,29 @@ def main() -> None:
                 f"first missing: {missing[0]}"
             )
 
+    model_paths = {
+        seed: resolve_model_path(args.models_root, args.model_file, seed)
+        for seed in args.seeds
+    }
+    for seed, model_path in model_paths.items():
+        print(f"selected model for seed={seed}: {model_path}")
+
+    if args.output_dir is None:
+        selected_paths = set(model_paths.values())
+        if len(selected_paths) == 1:
+            selected_model = next(iter(selected_paths))
+            if selected_model.parent.name == "checkpoints":
+                selected_run = selected_model.parent.parent
+            else:
+                selected_run = selected_model.parent
+            args.output_dir = selected_run / "inference_search"
+        else:
+            args.output_dir = args.models_root / "inference_search"
+
     seed_results: SeedResults = {}
     deterministic_seed_results: SeedResults = {}
     for seed in args.seeds:
-        model_path = args.models_root / f"seed{seed}" / args.model_file
-        if not model_path.is_file():
-            raise FileNotFoundError(f"PPO model not found: {model_path}")
+        model_path = model_paths[seed]
         print(f"evaluating seed={seed}: {model_path}")
         seed_results[seed] = {}
         deterministic_seed_results[seed] = {}
@@ -579,6 +598,9 @@ def main() -> None:
                 "sample_trajectories": SAMPLE_BUDGET,
                 "model_root": str(args.models_root),
                 "model_file": str(args.model_file),
+                "resolved_models": {
+                    str(seed): str(model_paths[seed]) for seed in args.seeds
+                },
                 "seeds": args.seeds,
                 "groups": groups,
                 "reference_rules": str(args.ref_rules) if reference_rules else None,
@@ -590,6 +612,7 @@ def main() -> None:
                 "workers": args.workers,
                 "torch_threads": args.torch_threads,
                 "torch_interop_threads": args.torch_interop_threads,
+                "output_dir": str(args.output_dir),
             },
             stream,
             indent=2,

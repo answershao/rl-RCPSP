@@ -12,7 +12,6 @@ from src.core.rules import rule_makespan
 from src.data.adapter import load_core_instance
 from src.envs.observation import (
     ObservationLayout,
-    RESOURCE_PROFILE_BIN_COUNT,
     flatten_observation,
 )
 from src.envs.rcpsp_env import (
@@ -107,38 +106,63 @@ class RcpspEnvTest(unittest.TestCase):
 
         observation, _ = env.reset()
         dynamic = observation["dynamic_activity_features"]
-        # ready/start = 0, finish = 4 units = the whole reference, no resource
-        # wait, the insertion adds 4 units and each downstream path is 4 units.
-        # Under the previous /horizon denominator these would be [0, 0, 1/3,
-        # 0, 1/3, 1/3] -- a third of the declared range.
-        np.testing.assert_allclose(dynamic[0], [0.0, 0.0, 1.0, 0.0, 1.0, 1.0])
+        # Time positions use the exact duration-sum horizon, while the
+        # insertion increment uses the largest activity duration.  Thus all
+        # fields remain lossless within the declared [0, 1] representation.
+        np.testing.assert_allclose(
+            dynamic[0], [0.0, 0.0, 1 / 3, 0.0, 1.0, 1 / 3]
+        )
 
-    def test_profile_bins_tile_the_usage_horizon_without_gaps(self) -> None:
-        """The profile grid must stay gap-free after moving onto time_scale.
-
-        Bin edges are still derived so that bin i ends where bin i+1 starts;
-        the final bin is widened to ``horizon`` because a policy may overrun
-        the reference and those insertions must not fall outside the grid.
-        """
-        for instance in (parallel_instance(), load_core_instance(TEST_INSTANCE)):
-            env = RCPSPEnv(instance)
-            ranges = env._resource_profile_ranges
-            self.assertEqual(len(ranges), RESOURCE_PROFILE_BIN_COUNT)
-            self.assertEqual(ranges[0][0], 0)
-            self.assertEqual(ranges[-1][1], env.horizon)
-            covered = np.zeros(env.horizon, dtype=bool)
-            for _, (start, stop) in enumerate(ranges):
-                covered[start:stop] = True
-            self.assertTrue(covered.all())
-
-    def test_time_features_saturate_instead_of_leaving_the_declared_range(self) -> None:
+    def test_exact_state_exposes_schedule_times_and_full_resource_profile(self) -> None:
         env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
-        # Force the reference far below any achievable makespan so the overflow
-        # path (a policy that overruns the LST reference) is exercised directly.
-        env.time_scale = 1
+        observation, _ = env.reset(seed=7)
+        self.assertEqual(
+            observation["resource_profile"].shape,
+            (env.resource_count, env.horizon),
+        )
+        self.assertTrue(env.observation_space.contains(observation))
+
+        eligible = np.flatnonzero(observation["eligible_mask"])
+        while not any(env._durations[int(index)] > 0 for index in eligible):
+            observation, _, terminated, truncated, _ = env.step(int(eligible[0]))
+            self.assertFalse(terminated)
+            self.assertFalse(truncated)
+            eligible = np.flatnonzero(observation["eligible_mask"])
+        action = next(
+            int(index) for index in eligible if env._durations[int(index)] > 0
+        )
+        observation, _, terminated, truncated, info = env.step(action)
+        self.assertFalse(terminated)
+        self.assertFalse(truncated)
+        self.assertEqual(
+            int(observation["scheduled_finish_times"][action]), info["finish"]
+        )
+
+        layout = ObservationLayout(env.activity_count, env.resource_count, env.horizon)
+        flattened = flatten_observation(
+            observation,
+            env.instance.capacities,
+            max_activities=env.activity_count,
+            max_resources=env.resource_count,
+            max_horizon=env.horizon,
+        )
+        self.assertEqual(flattened.shape, (layout.size,))
+        self.assertAlmostEqual(
+            float(flattened[layout.scheduled_finish_times.start + action]),
+            info["finish"] / env.horizon,
+        )
+        self.assertAlmostEqual(
+            float(flattened[layout.horizon]), 1.0
+        )
+        self.assertAlmostEqual(
+            float(flattened[layout.time_scale]), env.time_scale / env.horizon
+        )
+
+    def test_flattened_exact_state_stays_inside_declared_range(self) -> None:
+        env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
         observation, _ = env.reset(seed=5)
 
-        layout = ObservationLayout(env.activity_count, env.resource_count)
+        layout = ObservationLayout(env.activity_count, env.resource_count, env.horizon)
         rng = np.random.default_rng(5)
         terminated = False
         peak = 0.0
@@ -148,12 +172,11 @@ class RcpspEnvTest(unittest.TestCase):
             flattened = flatten_observation(
                 observation,
                 env.instance.capacities,
-                env.time_scale,
+                max_horizon=env.horizon,
             )
             self.assertTrue(np.all((flattened >= 0.0) & (flattened <= 1.0)))
             self.assertFalse(truncated)
             peak = max(peak, float(flattened[layout.current_time]))
-        # current_time / time_scale would be ~40 without the clip.
         self.assertLessEqual(peak, 1.0)
         self.assertGreater(env.schedule.makespan, 1)
 
@@ -276,15 +299,9 @@ class RcpspEnvTest(unittest.TestCase):
 
             normalized_usage = env._state.usage[: env.horizon].astype(np.float32)
             normalized_usage /= env._capacity_scale[None, :]
-            expected = np.zeros_like(observation["resource_profile"])
-            expected = expected.reshape(env.resource_count, 2, 16)
-            for bin_index, (start, stop) in enumerate(env._resource_profile_ranges):
-                values = normalized_usage[start:stop]
-                expected[:, 0, bin_index] = values.mean(axis=0)
-                expected[:, 1, bin_index] = values.max(axis=0)
             np.testing.assert_allclose(
-                observation["resource_profile"].reshape(env.resource_count, 2, 16),
-                expected,
+                observation["resource_profile"],
+                normalized_usage.T,
                 atol=1e-7,
             )
 

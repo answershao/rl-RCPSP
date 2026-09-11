@@ -21,11 +21,6 @@ from src.core.rcpsp import Instance, latest_start_times
 # keeps the cache contract explicit while avoiding oversized edge tensors.
 MAX_SUCCESSORS = 20
 MAX_PREDECESSORS = 20
-RESOURCE_PROFILE_BIN_COUNT = 16
-RESOURCE_PROFILE_CHANNEL_COUNT = 2
-RESOURCE_PROFILE_FEATURE_COUNT = (
-    RESOURCE_PROFILE_BIN_COUNT * RESOURCE_PROFILE_CHANNEL_COUNT
-)
 DYNAMIC_ACTIVITY_FEATURES = (
     "precedence_ready_time",
     "earliest_start",
@@ -39,14 +34,17 @@ DYNAMIC_ACTIVITY_FEATURE_COUNT = len(DYNAMIC_ACTIVITY_FEATURES)
 
 @dataclass(frozen=True)
 class ObservationLayout:
-    """Named slices for the compact, dynamic observation contract."""
+    """Named slices for the exact dynamic Markov-state observation."""
 
     max_activities: int
     max_resources: int
+    max_horizon: int
 
     def __post_init__(self) -> None:
         if min(self.max_activities, self.max_resources) < 1:
             raise ValueError("observation dimensions must be positive")
+        if self.max_horizon < 1:
+            raise ValueError("max_horizon must be positive")
 
     @cached_property
     def activity_status(self) -> slice:
@@ -64,10 +62,31 @@ class ObservationLayout:
         )
 
     @cached_property
-    def dynamic_activity_features(self) -> slice:
+    def remaining_predecessors(self) -> slice:
         return slice(
             self.eligible_mask.stop,
-            self.eligible_mask.stop
+            self.eligible_mask.stop + self.max_activities,
+        )
+
+    @cached_property
+    def scheduled_start_times(self) -> slice:
+        return slice(
+            self.remaining_predecessors.stop,
+            self.remaining_predecessors.stop + self.max_activities,
+        )
+
+    @cached_property
+    def scheduled_finish_times(self) -> slice:
+        return slice(
+            self.scheduled_start_times.stop,
+            self.scheduled_start_times.stop + self.max_activities,
+        )
+
+    @cached_property
+    def dynamic_activity_features(self) -> slice:
+        return slice(
+            self.scheduled_finish_times.stop,
+            self.scheduled_finish_times.stop
             + self.max_activities * DYNAMIC_ACTIVITY_FEATURE_COUNT,
         )
 
@@ -83,7 +102,7 @@ class ObservationLayout:
         return slice(
             self.remaining_capacity.stop,
             self.remaining_capacity.stop
-            + self.max_resources * RESOURCE_PROFILE_FEATURE_COUNT,
+            + self.max_resources * self.max_horizon,
         )
 
     @cached_property
@@ -92,11 +111,43 @@ class ObservationLayout:
 
     @cached_property
     def global_features(self) -> slice:
-        return slice(self.remaining_capacity.start, self.current_time + 1)
+        return slice(self.remaining_capacity.start, self.time_scale + 1)
+
+    @cached_property
+    def critical_lower_bound(self) -> int:
+        return self.current_time + 1
+
+    @cached_property
+    def resource_work(self) -> int:
+        return self.critical_lower_bound + 1
+
+    @cached_property
+    def steps(self) -> int:
+        return self.resource_work + 1
+
+    @cached_property
+    def invalid_action_penalty(self) -> int:
+        return self.steps + 1
+
+    @cached_property
+    def terminated(self) -> int:
+        return self.invalid_action_penalty + 1
+
+    @cached_property
+    def aborted(self) -> int:
+        return self.terminated + 1
+
+    @cached_property
+    def horizon(self) -> int:
+        return self.aborted + 1
+
+    @cached_property
+    def time_scale(self) -> int:
+        return self.horizon + 1
 
     @cached_property
     def instance_index(self) -> int:
-        return self.current_time + 1
+        return self.time_scale + 1
 
     @cached_property
     def size(self) -> int:
@@ -104,9 +155,17 @@ class ObservationLayout:
 
 
 @lru_cache(maxsize=None)
-def observation_layout(max_activities: int, max_resources: int) -> ObservationLayout:
+def observation_layout(
+    max_activities: int,
+    max_resources: int,
+    max_horizon: int,
+) -> ObservationLayout:
     """Reuse immutable slice metadata on the per-environment-step hot path."""
-    return ObservationLayout(max_activities, max_resources)
+    return ObservationLayout(
+        max_activities,
+        max_resources,
+        max_horizon=max_horizon,
+    )
 
 
 @dataclass(frozen=True)
@@ -277,12 +336,12 @@ def build_static_graph_cache(
 def flatten_observation(
     observation: Mapping[str, np.ndarray],
     capacities: tuple[int, ...],
-    time_scale: int,
     *,
     instance_index: int = 0,
     catalog_size: int = 1,
     max_activities: int | None = None,
     max_resources: int | None = None,
+    max_horizon: int,
     capacity_scale: np.ndarray | None = None,
     out: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -296,7 +355,26 @@ def flatten_observation(
     if catalog_size < 1 or not 0 <= instance_index < catalog_size:
         raise ValueError("instance_index must identify an entry in the static catalog")
 
-    layout = observation_layout(max_activities, max_resources)
+    required = {
+        "remaining_predecessors",
+        "scheduled_start_times",
+        "scheduled_finish_times",
+        "critical_lower_bound",
+        "resource_work",
+        "steps",
+        "invalid_action_penalty",
+        "terminated",
+        "aborted",
+        "horizon",
+        "time_scale",
+    }
+    missing = sorted(required.difference(observation))
+    if missing:
+        raise ValueError(f"exact observation is missing fields: {missing}")
+    local_horizon = int(observation["resource_profile"].shape[1])
+    if max_horizon < local_horizon:
+        raise ValueError("max_horizon cannot be smaller than the observation horizon")
+    layout = observation_layout(max_activities, max_resources, max_horizon)
     if out is None:
         result = np.zeros(layout.size, dtype=np.float32)
     else:
@@ -324,6 +402,34 @@ def flatten_observation(
         observation["eligible_mask"],
         casting="unsafe",
     )
+    np.divide(
+        observation["remaining_predecessors"],
+        float(MAX_PREDECESSORS),
+        out=result[
+            layout.remaining_predecessors.start:
+            layout.remaining_predecessors.start + activity_count
+        ],
+        casting="unsafe",
+    )
+    horizon_scale = float(max_horizon)
+    np.divide(
+        np.maximum(observation["scheduled_start_times"], 0),
+        horizon_scale,
+        out=result[
+            layout.scheduled_start_times.start:
+            layout.scheduled_start_times.start + activity_count
+        ],
+        casting="unsafe",
+    )
+    np.divide(
+        np.maximum(observation["scheduled_finish_times"], 0),
+        horizon_scale,
+        out=result[
+            layout.scheduled_finish_times.start:
+            layout.scheduled_finish_times.start + activity_count
+        ],
+        casting="unsafe",
+    )
     dynamic = result[layout.dynamic_activity_features].reshape(
         max_activities, DYNAMIC_ACTIVITY_FEATURE_COUNT
     )
@@ -347,30 +453,37 @@ def flatten_observation(
         casting="unsafe",
     )
     profile = result[layout.resource_profile].reshape(
-        max_resources,
-        RESOURCE_PROFILE_CHANNEL_COUNT,
-        RESOURCE_PROFILE_BIN_COUNT,
+        max_resources, max_horizon
     )
-    np.copyto(
-        profile[:resource_count],
-        observation["resource_profile"].reshape(
-            resource_count,
-            RESOURCE_PROFILE_CHANNEL_COUNT,
-            RESOURCE_PROFILE_BIN_COUNT,
-        ),
-        casting="unsafe",
+    profile[:resource_count, :local_horizon] = observation["resource_profile"]
+    result[layout.current_time] = observation["current_time"][0] / horizon_scale
+    result[layout.critical_lower_bound] = (
+        observation["critical_lower_bound"][0] / horizon_scale
     )
-    # ``time_scale`` is the env's per-instance reference makespan (see
-    # RCPSPEnv.time_scale), not the duration sum.  Clip because an arbitrary
-    # policy may overrun the reference and the flat Box is declared on [0, 1].
-    result[layout.current_time] = min(
-        observation["current_time"][0] / max(time_scale, 1), 1.0
+    result[layout.resource_work] = observation["resource_work"][0] / max(
+        float(np.sum(capacities) * max_horizon), 1.0
     )
+    result[layout.steps] = observation["steps"][0] / max(
+        float(2 * activity_count), 1.0
+    )
+    result[layout.invalid_action_penalty] = observation["invalid_action_penalty"][0]
+    result[layout.terminated] = observation["terminated"][0]
+    result[layout.aborted] = observation["aborted"][0]
+    result[layout.horizon] = observation["horizon"][0] / horizon_scale
+    result[layout.time_scale] = observation["time_scale"][0] / horizon_scale
     # Zero is reserved for malformed/padded observations.
     result[layout.instance_index] = (instance_index + 1) / catalog_size
     return result
 
 
-def observation_size(activity_count: int, resource_count: int) -> int:
+def observation_size(
+    activity_count: int,
+    resource_count: int,
+    max_horizon: int,
+) -> int:
     """Return the compact dynamic observation length."""
-    return observation_layout(activity_count, resource_count).size
+    return observation_layout(
+        activity_count,
+        resource_count,
+        max_horizon,
+    ).size

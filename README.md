@@ -54,9 +54,10 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | GA | `python -m scripts.run_ga --data-root data --suites psplib_j30 --instance-workers 8 --seed 17 --output-csv outputs/ga_j30/ga.csv` | ga CSV（`ga_makespan` 等，默认 50×200） |
 | GPHH | `python -m scripts.run_gphh --data-root data --splits splits.json --train-instances 60 --seed 17 --eval-suites psplib_j30 --eval-workers 8 --output-dir outputs/gphh_j30/trial1` | `best_rule.txt` + `eval_summary.csv` + `history.csv` + `run_meta.json` |
 | PPO 训练 | `bash train_a800.sh`（GPU）／`bash train_cpu.sh`（CPU；默认训后评测） | `final_model.zip` + `ppo_eval_summary.csv` |
+| PPO 状态表示 | 默认使用 exact Markov state | 逐活动 start/finish + 完整逐时刻 resource profile 的 PPO checkpoint |
 | PPO 训练吞吐扫描 | `python -m scripts.bench_ppo --caps 122 --threads 8 16 20 --batch-sizes 512 1024 4096` | 终端表格 / 可选 `--output-csv`（rollout·update·total fps） |
-| PPO 评估已有模型 | `bash eval_cpu.sh`（MODEL_DIR 指向 run 目录，评估 PSPLIB j30-j120） | 同上目录追加 `ppo_eval_summary.csv` |
-| 跨 seed 搜索 | `bash search_cpu.sh`（模型须放 `outputs/experiments/ppo/seedN/final_model.zip`） | inference_search 结果 |
+| PPO 评估已有模型 | `bash eval_cpu.sh`（自动选择 `outputs/experiments/ppo/cpu_runs` 下最新且已有 `checkpoints/best_model.zip` 的 run；也可用 `MODEL_DIR` 覆盖） | 同上目录追加含 PPO/LST/BKS 及 BKS gap 的 `ppo_eval_summary.csv` |
+| PPO 搜索 | `bash search_cpu.sh` 或 `python -m scripts.search_ppo`（默认选择最新 CPU run 的 `checkpoints/best_model.zip`） | 该 run 下的 `inference_search` 结果 |
 | 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --params outputs/instance_stats/instances.csv --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv` + `summary_by_regime.csv`（gap vs BKS、below-BKS 告警、RF×RS 分档） |
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
 | **一键 S2+S4+S6** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→可选 GPHH→aggregate；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |
@@ -76,8 +77,8 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | GPHH | `outputs/gphh_<suite>/<trial>/…` |
 | 统一汇总 | `outputs/aggregate_<scope>/…` |
 | PPO 训练 run | `outputs/experiments/ppo/<run>/`（模型、checkpoints、tensorboard、eval CSV） |
-| PPO 跨 seed 存档 | `outputs/experiments/ppo/seed<seed>/final_model.zip`（search_ppo 的输入约定） |
-| 跨 seed 搜索 | `outputs/experiments/ppo/inference_search/` |
+| PPO 跨 seed 存档 | `outputs/experiments/ppo/seed<seed>/final_model.zip`（仍兼容 search_ppo 的显式输入） |
+| PPO 搜索 | 默认写入所选 CPU run 的 `inference_search/`；显式 `--output-dir` 可覆盖 |
 | 可视化 | `outputs/visualizations/<instance_stem>/` |
 | 运行日志 | `logs/ppo/*.log`（train/eval/search 均 nohup 后台写此） |
 
@@ -96,16 +97,13 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
   （`duration/max(duration)`、`downstream/max(downstream)`），不再除以 duration 总和——
   后者 ∝1/n，曾让 j120 的 dur 特征交叠掉到 0.22。修正后 j30-j120 的两个时长特征交叠
   0.97–0.99、demand/capacity 0.85–0.96；跨规模分布齐平，无 n 相关漂移。
-- **时间型特征改用实例级 `time_scale`（2026-09-10 二次修正）**：动态活动特征的 6 维、
-  全局 `current_time`、以及 `resource_profile` 的 16 个 bin，全部改除以
-  `RCPSPEnv.time_scale`（= LST 优先规则跑一条串行 SGS 的 makespan，每实例算一次；
-  j30 0.5ms / j120 3.5ms / RG300 60ms），不再除以 horizon(=Σd)。Σd 是安全上界但比真实
-  makespan 大 2.3–5.3 倍（j120 实测 makespan/Σd=0.23），旧口径下 128 个 profile 通道里
-  124 个恒为 0（现在 16/16 箱非零）。`time_scale` 是**参照不是上界**（随机策略实测 10/12
-  实例越界），越界特征被 clip 到 1.0，profile 末位 bin 加宽兜住溢出区。
-  **例外**：`makespan_increment` 除以实例内 **max(duration)** 而非 `time_scale`——
-  插入代价的上界就是最大单个活动，这样天花板恒为 1.0、跨套件可比（除 `time_scale` 时
-  天花板只有 0.09–0.20）；也不能除自身时长，那会塌成 {0,1}（无延迟时恰等于自身时长）。
+- **PPO 输入改为 exact-state Markov observation（2026-09-11）**：动态状态不再用资源
+  分桶摘要，而是逐活动的 `scheduled_start_times`/`scheduled_finish_times`、剩余前驱数，
+  以及完整的 `resource_count × horizon` 逐时刻资源占用日历；同时显式编码
+  `current_time`、动态关键路径下界、累计资源工作量、步数、非法动作累计值、终止/截断标志、
+  `horizon` 和 `time_scale`。时间位置用 duration-sum `horizon` 做无损归一化，
+  `makespan_increment` 用实例内最大活动时长归一化；`time_scale` 作为奖励尺度显式输入，
+  不再承担有损的时间轴截断。
 - **reward 与 episode 指标同样除以 `time_scale`**（不再是 Σd）：γ=1 下回报精确等于
   `-makespan/time_scale` ∈ 约 [−2, −0.9]，value target 落在 O(1)；除 Σd 时它是个近乎
   常数（≈0.3）的弱信号，实测 `explained_variance` 在 +0.55/−1.60 间摆动。
@@ -113,7 +111,7 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 - **静态 LST 特征（2026-09-10 新增）**：`StaticGraphCache` 增加 `slack_ratios`
   （=(LST−EST)/CP，用**关键路径长**而非 Σd 当deadline，故 ∈[0,1] 且尺度无关）与
   `on_critical_path`（slack==0 的 0/1 位）。两者都是资源无关的 CPM 量，静态缓存一次算好，
-  经 `activity_input_dim` 7→9 喂进编码器。LST 是 RCPSP 信息量最大的单一结构特征
+  经 `activity_input_dim` 喂进编码器。LST 是 RCPSP 信息量最大的单一结构特征
   （MSLK/WCS/GPHH 终端都建立在它上面）。
 - **评估按 regime 分档**：`scripts/aggregate_results.py --params outputs/instance_stats/instances.csv`
   额外产出 `summary_by_regime.csv`（suite × RF 档 × RS 四分位 × 方法）。

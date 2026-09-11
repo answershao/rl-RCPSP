@@ -33,14 +33,18 @@ class MultiInstanceTest(unittest.TestCase):
             catalog_size=5,
         )
         observation, _ = env.reset(seed=3)
-        layout = ObservationLayout(env.max_activities, env.max_resources)
+        layout = ObservationLayout(
+            env.max_activities, env.max_resources, env.max_horizon
+        )
         self.assertAlmostEqual(float(observation[layout.instance_index]), 0.8)
 
     def test_static_graph_cache_contains_successor_indices(self):
         env = MultiInstanceRCPSPEnv([TEST_INSTANCE])
         observation, _ = env.reset(seed=3)
         active = env.active_env
-        layout = ObservationLayout(env.max_activities, env.max_resources)
+        layout = ObservationLayout(
+            env.max_activities, env.max_resources, env.max_horizon
+        )
         cache = build_static_graph_cache(
             [active.instance],
             max_activities=env.max_activities,
@@ -70,7 +74,7 @@ class MultiInstanceTest(unittest.TestCase):
         expected = flatten_observation(
             raw_observation,
             single_env.instance.capacities,
-            single_env.time_scale,
+            max_horizon=multi_env.max_horizon,
             capacity_scale=np.maximum(
                 np.asarray(single_env.instance.capacities, dtype=np.float32), 1.0
             ),
@@ -78,11 +82,14 @@ class MultiInstanceTest(unittest.TestCase):
         np.testing.assert_allclose(multi_observation, expected)
 
     def test_observation_layout_covers_each_feature_once(self):
-        layout = ObservationLayout(max_activities=5, max_resources=2)
+        layout = ObservationLayout(max_activities=5, max_resources=2, max_horizon=12)
         fields = (
             layout.activity_status,
             layout.precedence_satisfied,
             layout.eligible_mask,
+            layout.remaining_predecessors,
+            layout.scheduled_start_times,
+            layout.scheduled_finish_times,
             layout.dynamic_activity_features,
             layout.remaining_capacity,
             layout.resource_profile,
@@ -90,7 +97,8 @@ class MultiInstanceTest(unittest.TestCase):
         self.assertEqual(fields[0].start, 0)
         self.assertTrue(all(first.stop == second.start for first, second in zip(fields, fields[1:])))
         self.assertEqual(fields[-1].stop, layout.current_time)
-        self.assertEqual(layout.current_time + 1, layout.instance_index)
+        self.assertEqual(layout.current_time + 1, layout.critical_lower_bound)
+        self.assertEqual(layout.time_scale + 1, layout.instance_index)
         self.assertEqual(layout.instance_index + 1, layout.size)
 
     def test_padded_actions_use_the_bounded_rejection_path(self) -> None:

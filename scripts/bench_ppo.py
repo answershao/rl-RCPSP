@@ -88,6 +88,10 @@ def measure(
                 [instance.name],
                 max_activities=cap,
                 max_resources=max_resources,
+                max_horizon=max(
+                    sum(activity.duration for activity in item.activities.values())
+                    for item in instances
+                ),
                 instance_indices=[index],
                 catalog_size=len(instances),
                 loader=lambda _path, item=instance: item,
@@ -136,7 +140,14 @@ def measure(
         "n_steps": args.n_steps,
         "n_epochs": args.n_epochs,
         "gin_layers": args.gin_layers,
-        "obs_dim": observation_size(cap, max_resources),
+        "obs_dim": observation_size(
+            cap,
+            max_resources,
+            max(
+                sum(activity.duration for activity in item.activities.values())
+                for item in instances
+            ),
+        ),
         "rollout_seconds": round(rollout_seconds, 3),
         "update_seconds": round(update_seconds, 3),
         "rollout_fps": round(steps / rollout_seconds, 1),

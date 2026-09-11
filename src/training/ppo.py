@@ -16,9 +16,9 @@ from src.core.rcpsp import Instance
 from src.data.adapter import load_core_instance
 from src.envs.observation import (
     MAX_SUCCESSORS,
-    ObservationLayout,
     StaticGraphCache,
     build_static_graph_cache,
+    observation_size,
 )
 from src.training.features import GINActorCriticHeads, SharedDirectedGINExtractor
 
@@ -141,19 +141,22 @@ def create_ppo(
         raise ValueError("mixed_precision must be one of: none, bf16, fp16")
     action_count = int(env.action_space.n)
     base_env = env.envs[0] if hasattr(env, "envs") else env
+    base_env = getattr(base_env, "unwrapped", base_env)
     max_activities = action_count
-    observation_dim = int(env.observation_space.shape[0])
-    one_resource_size = ObservationLayout(max_activities, 1).size
-    per_resource_size = ObservationLayout(max_activities, 2).size - one_resource_size
-    resource_payload = observation_dim - one_resource_size
-    if resource_payload <= 0 or resource_payload % per_resource_size:
+    max_resources = int(getattr(base_env, "max_resources", 0))
+    max_horizon = int(getattr(base_env, "max_horizon", 0))
+    if max_resources < 1 or max_horizon < 1:
         raise ValueError(
-            "environment observation has incompatible RCPSP layout: "
-            f"got {observation_dim} for {max_activities} activities"
+            "environment must expose positive max_resources and max_horizon"
         )
-    max_resources = resource_payload // per_resource_size + 1
     if max_resources < max(instance.resource_count for instance in instances):
         raise ValueError("environment observation cannot represent all instance resources")
+    expected_observation_shape = (observation_size(max_activities, max_resources, max_horizon),)
+    if env.observation_space.shape != expected_observation_shape:
+        raise ValueError(
+            "environment observation has incompatible RCPSP layout: "
+            f"expected {expected_observation_shape}, got {env.observation_space.shape}"
+        )
     max_successors = getattr(base_env, "max_successors", MAX_SUCCESSORS)
     if static_cache is None:
         static_cache = build_static_graph_cache(
@@ -185,6 +188,7 @@ def create_ppo(
             "features_extractor_kwargs": {
                 "max_activities": max_activities,
                 "max_resources": max_resources,
+                "max_horizon": max_horizon,
                 "static_cache": static_cache,
                 "max_successors": max_successors,
                 "gin_layers": gin_layers,
@@ -282,6 +286,7 @@ def evaluate_paths(
                     [path],
                     max_activities=reference_env.max_activities,
                     max_resources=reference_env.max_resources,
+                    max_horizon=extractor.max_horizon,
                     instance_indices=[batch_start + local_index],
                     catalog_size=extractor.instance_count,
                     loader=loader,
@@ -392,6 +397,7 @@ def evaluate_paths_sampled(
                             [path],
                             max_activities=reference_env.max_activities,
                             max_resources=reference_env.max_resources,
+                            max_horizon=extractor.max_horizon,
                             instance_indices=[batch_start + local_index],
                             catalog_size=extractor.instance_count,
                             loader=loader,

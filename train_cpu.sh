@@ -75,7 +75,6 @@ COMPILE_MODE="${COMPILE_MODE:-default}"
 SEED="${SEED:-17}"
 EVAL_ALL="${EVAL_ALL:-1}"
 EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
-
 EVAL_ARGS=()
 if [[ "${EVAL_ALL}" == "1" ]]; then
     EVAL_ARGS=(--eval-suites "${EVAL_SUITES}")

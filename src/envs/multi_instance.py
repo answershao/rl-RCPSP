@@ -51,6 +51,7 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
 
     def __init__(self, instances: list[str | Path],
                  max_activities: int | None = None, max_resources: int | None = None,
+                 max_horizon: int | None = None,
                  instance_indices: list[int] | None = None,
                  catalog_size: int | None = None,
                  reward_shaping_coef: float = 0.0,
@@ -70,14 +71,24 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
             raise ValueError("instance_indices must refer to the static graph catalog")
         self.max_activities = max([max_activities or 0] + [len(instance.activities) for instance in self.instances])
         self.max_resources = max([max_resources or 0] + [instance.resource_count for instance in self.instances])
+        self.max_horizon = max(
+            [max_horizon or 0]
+            + [sum(activity.duration for activity in instance.activities.values())
+               for instance in self.instances]
+        )
         self.max_successors = MAX_SUCCESSORS
         self.action_space = spaces.Discrete(self.max_activities)
-        feature_size = observation_size(self.max_activities, self.max_resources)
+        feature_size = observation_size(
+            self.max_activities, self.max_resources, self.max_horizon
+        )
         self.observation_space = spaces.Box(0.0, 1.0, (feature_size,), dtype=np.float32)
         # Reuse environment objects across episodes; reset only clears mutable
         # scheduling state and avoids repeated allocation of large buffers.
         self._envs = [
-            RCPSPEnv(instance, reward_shaping_coef=reward_shaping_coef)
+            RCPSPEnv(
+                instance,
+                reward_shaping_coef=reward_shaping_coef,
+            )
             for instance in self.instances
         ]
         self._env: RCPSPEnv | None = None
@@ -128,17 +139,22 @@ class MultiInstanceRCPSPEnv(gym.Env[np.ndarray, int]):
         buffer = self._flat_buffers.get(self._active_index)
         if buffer is None:
             buffer = np.zeros(
-                observation_size(self.max_activities, self.max_resources), dtype=np.float32
+                observation_size(
+                    self.max_activities,
+                    self.max_resources,
+                    self.max_horizon,
+                ),
+                dtype=np.float32,
             )
             self._flat_buffers[self._active_index] = buffer
         return flatten_observation(
             observation,
             env.instance.capacities,
-            env.time_scale,
             instance_index=self.instance_indices[self._active_index],
             catalog_size=self.catalog_size,
             max_activities=self.max_activities,
             max_resources=self.max_resources,
+            max_horizon=self.max_horizon,
             capacity_scale=self._capacity_scales[self._active_index],
             out=buffer,
         )

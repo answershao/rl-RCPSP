@@ -88,11 +88,16 @@ class CriticPaddingInvarianceTest(unittest.TestCase):
         self.max_resources = max(
             instance.resource_count for instance in self.instances
         )
-        self.layout = ObservationLayout(PADDED_CAP, self.max_resources)
+        self.max_horizon = max(
+            sum(activity.duration for activity in instance.activities.values())
+            for instance in self.instances
+        )
+        self.layout = ObservationLayout(PADDED_CAP, self.max_resources, self.max_horizon)
         self.env = make_multi_env(
             [str(TEST_INSTANCE)],
             max_activities=PADDED_CAP,
             max_resources=self.max_resources,
+            max_horizon=self.max_horizon,
             instance_indices=[0],
             catalog_size=len(self.instances),
         )

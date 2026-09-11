@@ -84,8 +84,8 @@ tests/              解析、内核、规则、环境、模型和脚本回归测
 |---|---|---|
 | `python -m scripts.extract_bks` | 从 RCPLIB xlsx 生成 BKS JSON | 原始 xlsx |
 | `python -m scripts.bench_ppo` | 扫描目标机器的 PPO batch/线程吞吐 | 可运行的训练环境 |
-| `bash eval_cpu.sh` | 评估已有模型 | run 目录中的 `final_model.zip` |
-| `bash search_cpu.sh` | 汇总多 seed 的采样评估 | `seed<N>/final_model.zip` |
+| `bash eval_cpu.sh` | 评估已有模型；默认自动选择 `cpu_runs` 下最新且包含 `checkpoints/best_model.zip` 的 run，也可用 `MODEL_DIR` 覆盖 | 所选 run 的模型与含 PPO/LST/BKS gap 的 `ppo_eval_summary.csv` |
+| `bash search_cpu.sh` | 采样评估；默认自动选择最新 CPU run 的 `checkpoints/best_model.zip`，也兼容 `seed<N>` 布局 | 所选 run 的 `inference_search/` |
 | `python -m scripts.compare_ppo_results` | 对比两次 PPO 评估 | 两个评估 CSV |
 | `python -m scripts.visualize_instance` | 输出单实例 AON/Gantt 图 | 一个 `.sm` 或 `.rcp` 文件 |
 

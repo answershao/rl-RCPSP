@@ -20,9 +20,6 @@ from src.core.rcpsp import (
 from src.core.rules import rule_makespan
 from src.envs.observation import (
     DYNAMIC_ACTIVITY_FEATURE_COUNT,
-    RESOURCE_PROFILE_BIN_COUNT,
-    RESOURCE_PROFILE_CHANNEL_COUNT,
-    RESOURCE_PROFILE_FEATURE_COUNT,
 )
 
 
@@ -144,6 +141,15 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             {
                 "activity_status": spaces.Box(0, 2, (self.activity_count,), dtype=np.int8),
                 "precedence_satisfied": spaces.MultiBinary(self.activity_count),
+                "remaining_predecessors": spaces.Box(
+                    0, int_max, (self.activity_count,), dtype=np.int32
+                ),
+                "scheduled_start_times": spaces.Box(
+                    0, max(self.horizon, 1), (self.activity_count,), dtype=np.int32
+                ),
+                "scheduled_finish_times": spaces.Box(
+                    0, max(self.horizon, 1), (self.activity_count,), dtype=np.int32
+                ),
                 "durations": spaces.Box(0, max(max_duration, 1), (self.activity_count,), dtype=np.int32),
                 "resource_demands": spaces.Box(
                     0, int_max, (self.activity_count, self.resource_count), dtype=np.int32
@@ -154,7 +160,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
                 "resource_profile": spaces.Box(
                     0.0,
                     1.0,
-                    (self.resource_count, RESOURCE_PROFILE_FEATURE_COUNT),
+                    (self.resource_count, max(self.horizon, 1)),
                     dtype=np.float32,
                 ),
                 "current_time": spaces.Box(0, max(self.horizon, 1), (1,), dtype=np.int32),
@@ -165,6 +171,14 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
                     (self.activity_count, DYNAMIC_ACTIVITY_FEATURE_COUNT),
                     dtype=np.float32,
                 ),
+                "critical_lower_bound": spaces.Box(0, max(self.horizon, 1), (1,), dtype=np.int32),
+                "resource_work": spaces.Box(0, int_max, (1,), dtype=np.int64),
+                "steps": spaces.Box(0, self._step_budget, (1,), dtype=np.int32),
+                "invalid_action_penalty": spaces.Box(0.0, np.inf, (1,), dtype=np.float32),
+                "terminated": spaces.MultiBinary(1),
+                "aborted": spaces.MultiBinary(1),
+                "horizon": spaces.Box(0, max(self.horizon, 1), (1,), dtype=np.int32),
+                "time_scale": spaces.Box(0, max(self.horizon, 1), (1,), dtype=np.int32),
             }
         )
 
@@ -216,18 +230,20 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         self._terminal_eligible_mask = np.zeros(self.activity_count, dtype=np.int8)
         self._remaining_capacity = np.zeros(self.resource_count, dtype=np.int32)
         self._resource_profile = np.zeros(
-            (self.resource_count, RESOURCE_PROFILE_FEATURE_COUNT),
+            (self.resource_count, max(self.horizon, 1)),
             dtype=np.float32,
         )
-        self._resource_profile_sums = np.zeros(
-            (self.resource_count, RESOURCE_PROFILE_BIN_COUNT), dtype=np.int64
-        )
-        self._resource_profile_ranges = tuple(
-            self._profile_range(bin_index)
-            for bin_index in range(RESOURCE_PROFILE_BIN_COUNT)
-        )
+        self._start_times = np.full(self.activity_count, -1, dtype=np.int32)
         self._finish_times = np.full(self.activity_count, -1, dtype=np.int32)
         self._current_time = np.zeros(1, dtype=np.int32)
+        self._critical_lower_bound = np.zeros(1, dtype=np.int32)
+        self._resource_work = np.zeros(1, dtype=np.int64)
+        self._steps = np.zeros(1, dtype=np.int32)
+        self._invalid_action_penalty = np.zeros(1, dtype=np.float32)
+        self._terminated = np.zeros(1, dtype=np.int8)
+        self._aborted = np.zeros(1, dtype=np.int8)
+        self._horizon = np.asarray([self.horizon], dtype=np.int32)
+        self._time_scale = np.asarray([self.time_scale], dtype=np.int32)
         self._dynamic_activity_features = np.zeros(
             (self.activity_count, DYNAMIC_ACTIVITY_FEATURE_COUNT), dtype=np.float32
         )
@@ -238,8 +254,10 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         super().reset(seed=seed)
         self._state.reset(self._predecessor_counts)
         self._resource_profile.fill(0.0)
-        self._resource_profile_sums.fill(0)
+        self._start_times.fill(-1)
         self._finish_times.fill(-1)
+        self._terminated.fill(0)
+        self._aborted.fill(0)
         observation = self._observation()
         return observation, {"eligible_mask": observation["eligible_mask"].copy()}
 
@@ -270,8 +288,12 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             current_makespan=state.current_time,
         )
         state.resource_work += int(self._resource_work_by_activity[chosen_index])
+        self._start_times[chosen_index] = start
         self._finish_times[chosen_index] = finish
-        self._update_resource_profile(start, finish, self._demands[chosen_index])
+        if finish > start:
+            self._resource_profile[:, start:finish] = (
+                state.usage[start:finish].T / self._capacity_scale[:, None]
+            )
         state.eligible_mask[chosen_index] = False
         for successor in self.instance.activities[chosen].successors:
             successor_index = self.activity_index[successor]
@@ -358,6 +380,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         truncated = False
         if not state.terminated and state.steps >= self._step_budget:
             state.aborted = True
+            self._aborted[0] = 1
             truncated = True
             info["aborted"] = True
         if state.terminated or truncated:
@@ -403,56 +426,6 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         used = float(self._state.resource_work)
         return used / capacity if capacity > 0 else 0.0
 
-    def _profile_range(self, bin_index: int) -> tuple[int, int]:
-        """Bin edges over ``[0, time_scale)``, final bin widened to ``horizon``.
-
-        Spreading the bins over the reference horizon instead of the duration
-        sum puts all of them where activities are actually scheduled.  The
-        final bin is widened to the full usage horizon because ``time_scale``
-        is only a reference: a policy can overrun it, and those insertions must
-        not silently fall outside the profile.
-        """
-        span = max(self.time_scale, 1)
-        start = (bin_index * span) // RESOURCE_PROFILE_BIN_COUNT
-        stop = ((bin_index + 1) * span) // RESOURCE_PROFILE_BIN_COUNT
-        if bin_index == RESOURCE_PROFILE_BIN_COUNT - 1:
-            stop = max(stop, self.horizon)
-        # Degenerate spans (very short instances) would otherwise produce empty
-        # bins; collapse them onto the first available slot.
-        if start >= stop and self.horizon > 0:
-            start = min(start, self.horizon - 1)
-            stop = start + 1
-        return start, stop
-
-    def _update_resource_profile(
-        self, start: int, finish: int, demand: np.ndarray
-    ) -> None:
-        """Refresh only profile bins touched by the latest SGS insertion."""
-        if start == finish or self.horizon == 0:
-            return
-        profile = self._resource_profile.reshape(
-            self.resource_count,
-            RESOURCE_PROFILE_CHANNEL_COUNT,
-            RESOURCE_PROFILE_BIN_COUNT,
-        )
-        for bin_index, (bin_start, bin_stop) in enumerate(
-            self._resource_profile_ranges
-        ):
-            overlap = max(0, min(finish, bin_stop) - max(start, bin_start))
-            if not overlap:
-                continue
-            self._resource_profile_sums[:, bin_index] += demand * overlap
-            width = bin_stop - bin_start
-            profile[:, 0, bin_index] = (
-                self._resource_profile_sums[:, bin_index]
-                / width
-                / self._capacity_scale
-            )
-            profile[:, 1, bin_index] = (
-                self._state.usage[bin_start:bin_stop].max(axis=0)
-                / self._capacity_scale
-            )
-
     def _observation(self) -> dict[str, np.ndarray]:
         status = self._status
         status.fill(0)
@@ -473,9 +446,15 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         remaining = self._remaining_capacity
         np.subtract(self._capacities, frontier_usage, out=remaining)
         self._current_time[0] = state.current_time
+        self._critical_lower_bound[0] = state.critical_lower_bound
+        self._resource_work[0] = state.resource_work
+        self._steps[0] = state.steps
+        self._invalid_action_penalty[0] = state.invalid_action_penalty
+        self._terminated[0] = int(state.terminated)
+        self._aborted[0] = int(state.aborted)
         dynamic = self._dynamic_activity_features
         dynamic.fill(0.0)
-        scale = float(max(self.time_scale, 1))
+        scale = float(max(self.horizon, 1))
         for activity_index in np.flatnonzero(eligible_mask):
             activity_id = self.activity_ids[int(activity_index)]
             ready = max(
@@ -492,21 +471,24 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
                 capacity_limit_array=self._capacity_limits[activity_index],
                 current_makespan=state.current_time,
             )
-            # Clipped because a bad policy can schedule past the reference
-            # horizon; the observation space declares [0, 1].  Note the fifth
-            # feature is scaled by the largest activity, not by ``time_scale``
-            # -- see ``self._max_duration``.
+            # The duration sum is a safe upper bound for every serial SGS
+            # schedule, so these time positions stay in [0, 1] without lossy
+            # clipping.  The fifth feature is scaled by the largest activity,
+            # not by ``time_scale`` -- see ``self._max_duration``.
             dynamic[activity_index] = (
-                min(ready / scale, 1.0),
-                min(start / scale, 1.0),
-                min(finish / scale, 1.0),
-                min(max(start - ready, 0) / scale, 1.0),
-                min(max(finish - state.current_time, 0) / self._max_duration, 1.0),
-                min((start + self._downstream_durations[activity_index]) / scale, 1.0),
+                ready / scale,
+                start / scale,
+                finish / scale,
+                max(start - ready, 0) / scale,
+                max(finish - state.current_time, 0) / self._max_duration,
+                (start + self._downstream_durations[activity_index]) / scale,
             )
         return {
             "activity_status": status,
             "precedence_satisfied": precedence,
+            "remaining_predecessors": state.remaining_predecessors,
+            "scheduled_start_times": np.maximum(self._start_times, 0),
+            "scheduled_finish_times": np.maximum(self._finish_times, 0),
             # These arrays are immutable instance data; avoid allocating copies
             # on every environment step.  Flattening converts them to float32.
             "durations": self._durations,
@@ -514,6 +496,14 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
             "remaining_capacity": remaining,
             "resource_profile": self._resource_profile,
             "current_time": self._current_time,
+            "critical_lower_bound": self._critical_lower_bound,
+            "resource_work": self._resource_work,
+            "steps": self._steps,
+            "invalid_action_penalty": self._invalid_action_penalty,
+            "terminated": self._terminated,
+            "aborted": self._aborted,
+            "horizon": self._horizon,
+            "time_scale": self._time_scale,
             "eligible_mask": eligible_mask,
             "dynamic_activity_features": dynamic,
         }

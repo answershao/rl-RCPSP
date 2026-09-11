@@ -379,7 +379,9 @@ class Sb3Test(unittest.TestCase):
         distribution = model.policy.get_distribution(observation_tensor)
         probabilities = distribution.distribution.probs.detach().cpu().numpy()[0]
         base_env = env.unwrapped.active_env
-        layout = ObservationLayout(base_env.activity_count, base_env.resource_count)
+        layout = ObservationLayout(
+            base_env.activity_count, base_env.resource_count, base_env.horizon
+        )
         eligible = observation[layout.eligible_mask] > 0.5
         np.testing.assert_array_equal(probabilities[~eligible], 0.0)
         self.assertAlmostEqual(float(probabilities[eligible].sum()), 1.0, places=6)
@@ -443,6 +445,30 @@ class Sb3Test(unittest.TestCase):
             evaluate_paths(
                 model, paths, seed=11, reference_env=reference_env, batch_size=0
             )
+
+    def test_exact_state_short_learning_run(self):
+        training_instance = load_core_instance(TEST_INSTANCE)
+        env = make_multi_env([TEST_INSTANCE])
+        model = create_ppo(
+            env,
+            instances=[training_instance],
+            n_steps=4,
+            batch_size=4,
+            n_epochs=1,
+            gin_layers=1,
+            seed=2,
+            device="cpu",
+        )
+        try:
+            extractor = model.policy.features_extractor
+            self.assertEqual(extractor.max_horizon, env.unwrapped.max_horizon)
+            observation, _ = env.reset(seed=3)
+            self.assertEqual(observation.shape, model.observation_space.shape)
+            model.learn(total_timesteps=4, progress_bar=False)
+            action, _ = model.predict(observation)
+            self.assertTrue(env.action_space.contains(action))
+        finally:
+            env.close()
 
 
 if __name__ == "__main__":
