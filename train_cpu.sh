@@ -45,14 +45,19 @@ N_STEPS="${N_STEPS:-384}"
 # epoch instead of 3.  Run `python -m scripts.bench_ppo --help` on the target
 # host to confirm.
 BATCH_SIZE="${BATCH_SIZE:-1024}"
-# PPO update time is strictly linear in n_epochs (measured 0.244/0.687/1.168 s
-# for 1/3/5 epochs on the 52-core host) while train/approx_kl stays around 1e-6
-# per epoch, four orders of magnitude below TARGET_KL -- the early stop never
-# fires, so the extra epochs are near-zero-movement repeat passes.
-N_EPOCHS="${N_EPOCHS:-3}"
+# Update time is strictly linear in n_epochs (measured 2.83/5.12/7.35 s for
+# 1/2/3 epochs on login02), while train/approx_kl stays around 1e-6 per epoch,
+# four orders of magnitude below TARGET_KL -- the early stop never fires, so
+# epochs 2 and 3 are near-zero-movement repeat passes.
+# Measured head-to-head at seed 17 on the 2026-09-11 attention baseline:
+# n_epochs=1 is 2.01x faster (1852 vs 920 fps) with no downside -- deterministic
+# M5 0.474% vs 0.327%, best-of-32 3.153% vs 3.160%, wins/losses 959/150 vs
+# 953/175. Default is therefore 1.
+N_EPOCHS="${N_EPOCHS:-1}"
 GLOBAL_DIM="${GLOBAL_DIM:-16}"
 TORCH_THREADS="${TORCH_THREADS:-24}"
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-3000000}"
+# Budget for the frozen baseline config (N_ENVS=40 x N_STEPS=384 -> 326 updates).
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-5000000}"
 LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 ENT_COEF="${ENT_COEF:-0.005}"
 VF_COEF="${VF_COEF:-0.5}"

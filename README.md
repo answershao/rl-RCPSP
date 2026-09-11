@@ -11,13 +11,20 @@
 ## 环境与测试
 
 ```bash
-conda activate rl                      # py3.12 + torch2.5 + SB3 2.7 + gymnasium 1.2 + numpy2
+conda activate rcmpsp                    # py3.11 · torch 2.13.0+cu126 · SB3 2.9.0 · gymnasium 1.3.0 · numpy 2.4.6
 python -m pytest -q -m 'not slow'      # 快测（含 SB3 短训）
 python -m pytest -q                    # 全量（含语料解析回归）
 python -m pytest -q -W error           # 全量且警告级失败
 python -m pytest -m slow               # 慢项：3256 个主协议实例解析回归
 python -m pytest -m "not slow"         # 仅快测
 ```
+
+> **`torch.compile` 需要 `g++`，缺了会静默降级。** 训练前必须能 `command -v g++`：
+> 登录节点靠 `~/.bashrc` 只在**交互式** shell 里 `module load gcc/14.1.0`，所以
+> **非交互环境（sbatch、脚本、nohup）必须显式 `module load gcc/14.1.0`**。
+> 缺 g++ 时 `train_ppo` 只打印一行 `g++ is unavailable; disabling torch.compile`，
+> 训练照跑但吞吐明显更低，且与已编译的 run 不可比。
+> 计算节点自带的 `/usr/bin/g++` 是 GCC 8.3.1，**inductor 构建会失败**，同样要 `module load`。
 
 测试体系：`pytest.ini` + 根 `conftest.py`（sys.path）+ `tests/conftest.py`（fixture）；
 全语料解析标 `@pytest.mark.slow`。
@@ -56,8 +63,14 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
 | PPO 训练 | `bash train_a800.sh`（GPU）／`bash train_cpu.sh`（CPU；默认训后评测） | `final_model.zip` + `ppo_eval_summary.csv` |
 | PPO 状态表示 | 默认使用 exact Markov state | 逐活动 start/finish + 完整逐时刻 resource profile 的 PPO checkpoint |
 | PPO 训练吞吐扫描 | `python -m scripts.bench_ppo --caps 122 --threads 8 16 20 --batch-sizes 512 1024 4096` | 终端表格 / 可选 `--output-csv`（rollout·update·total fps） |
-| PPO 评估已有模型 | `bash eval_cpu.sh`（自动选择 `outputs/experiments/ppo/cpu_runs` 下最新且已有 `checkpoints/best_model.zip` 的 run；也可用 `MODEL_DIR` 覆盖） | 同上目录追加含 PPO/LST/BKS 及 BKS gap 的 `ppo_eval_summary.csv` |
-| PPO 搜索 | `bash search_cpu.sh` 或 `python -m scripts.search_ppo`（默认选择最新 CPU run 的 `checkpoints/best_model.zip`） | 该 run 下的 `inference_search` 结果 |
+| PPO 评估已有模型 | `bash eval_cpu.sh`（不传 `MODEL_DIR` 时自动选择 `outputs/experiments/ppo/cpu_runs` 下最新且已有 `checkpoints/best_model.zip` 的 `cpu_YYYYMMDD_HHMMSS` run） | 同上目录追加含 PPO/LST/BKS 及 BKS gap 的 `ppo_eval_summary.csv` |
+| PPO 搜索 | `bash search_cpu.sh` 或 `python -m scripts.search_ppo`（同样选最新 `cpu_*` run 的 `checkpoints/best_model.zip`） | 该 run 下的 `inference_search` 结果 |
+
+> **自动选择只认 `cpu_YYYYMMDD_HHMMSS` 命名，不认描述性名字。** 实验臂若名为
+> `resource_attention_controlled`、`attn_base_seed29` 之类，它**不会被自动选中**——
+> 自动选择会回落到某个 `cpu_*` 旧 run 上，**而且不报错**。这类 run 必须显式指定：
+> `MODEL_DIR=<run> bash eval_cpu.sh`，或给 `search_ppo` 传**绝对** `--model-file`。
+
 | 统一汇总出表 | `python -m scripts.aggregate_results --rules … --ga … --gphh … --ppo … --bks data/bks/bks_psplib.json --params outputs/instance_stats/instances.csv --out-dir outputs/aggregate_<scope>` | `merged_detail.csv` + `summary_by_suite.csv` + `summary_by_regime.csv`（gap vs BKS、below-BKS 告警、RF×RS 分档） |
 | 单实例可视化 | `python -m scripts.visualize_instance data/psplib/j30/j3010_1.sm` | `outputs/visualizations/j3010_1/{gantt,aon}.png` |
 | **一键 S2+S4+S6** | `bash run_test_baselines.sh`（test=PSPLIB 全量：规则→GA→可选 GPHH→aggregate；`WITH_PPO=1` 在 PPO 训完后并入 ppo 列；已存在的阶段输出自动跳过，`ALLOW_OVERWRITE=1` 重算；`SMOKE_MAX_INSTANCES=2` 冒烟） | `outputs/{rules,ga,gphh}_psplib/…` + `outputs/aggregate_psplib/{merged_detail,summary_by_suite}.csv` |

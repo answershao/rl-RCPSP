@@ -16,6 +16,17 @@ tuned from measurements instead of guesses::
 
 The main protocol uses one 122-node cap for generated training data and held-out
 PSPLIB j30-j120 evaluation data.
+
+Match the production configuration before trusting the numbers.  ``train_cpu.sh``
+runs with ``--torch-compile --compile-mode default`` and ``--vec-env subproc
+--start-method spawn``.  Pass the same flags here: without ``--torch-compile``
+the update is measured in eager mode, and with the default ``--vec-env dummy``
+the rollout runs in a single process, so both phases come out pessimistic and
+the best thread count can land on the wrong value::
+
+    python -m scripts.bench_ppo --caps 122 --threads 8 16 20 24 32 \
+        --batch-sizes 1024 --torch-compile --compile-mode default \
+        --vec-env subproc --start-method spawn --repeats 3
 """
 from __future__ import annotations
 
@@ -46,6 +57,21 @@ class _NoopCallback(BaseCallback):
         return True
 
 
+class _FixedInstanceLoader:
+    """Picklable replacement for the ``loader=lambda _path, item=...: item`` closure.
+
+    ``dummy`` steps every environment in-process, so a closure is harmless there.
+    ``subproc`` pickles each ``env_fn`` to a spawned worker instead, and a lambda
+    cannot be pickled, so the instance is carried in an object.
+    """
+
+    def __init__(self, instance) -> None:
+        self.instance = instance
+
+    def __call__(self, _path):
+        return self.instance
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -64,6 +90,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--repeats", type=int, default=1,
                         help="time each combination N times and keep the best")
+    parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="dummy",
+                        help="mirror train_cpu.sh's --vec-env; subproc needs picklable env fns")
+    parser.add_argument("--start-method", default="spawn",
+                        help="start method for --vec-env subproc")
+    parser.add_argument("--torch-compile", action="store_true",
+                        help="compile features_extractor and mlp_extractor, as train_cpu.sh does")
+    parser.add_argument("--compile-mode", default="default",
+                        help="torch.compile mode; train_cpu.sh uses 'default' on CPU")
     parser.add_argument("--output-csv", type=Path, default=None)
     return parser.parse_args()
 
@@ -81,6 +115,10 @@ def measure(
     cache = build_static_graph_cache(
         instances, max_activities=cap, max_resources=max_resources
     )
+    max_horizon = max(
+        sum(activity.duration for activity in item.activities.values())
+        for item in instances
+    )
     env = make_vector_env(
         [
             partial(
@@ -88,17 +126,15 @@ def measure(
                 [instance.name],
                 max_activities=cap,
                 max_resources=max_resources,
-                max_horizon=max(
-                    sum(activity.duration for activity in item.activities.values())
-                    for item in instances
-                ),
+                max_horizon=max_horizon,
                 instance_indices=[index],
                 catalog_size=len(instances),
-                loader=lambda _path, item=instance: item,
+                loader=_FixedInstanceLoader(instance),
             )
             for index, instance in enumerate(instances[: args.n_envs])
         ],
-        backend="dummy",
+        backend=args.vec_env,
+        start_method=args.start_method,
     )
     try:
         model = create_ppo(
@@ -111,14 +147,20 @@ def measure(
             n_epochs=args.n_epochs,
             gin_layers=args.gin_layers,
             static_cache=cache,
+            torch_compile=args.torch_compile,
+            compile_mode=args.compile_mode,
         )
         model.verbose = 0
         callback = _NoopCallback()
         model._setup_learn(
             total_timesteps=10_000_000, callback=callback, progress_bar=False
         )
-        # One untimed iteration absorbs lazy allocation and kernel warm-up.
+        # One untimed iteration absorbs lazy allocation, kernel warm-up, and the
+        # one-off torch.compile graph build of *both* phases.  The update half is
+        # needed because the compiled update is only realised on its first call;
+        # timing it away here keeps the first repeat from being discarded.
         model.collect_rollouts(env, callback, model.rollout_buffer, model.n_steps)
+        model.train()
 
         rollout_seconds = update_seconds = float("inf")
         for _ in range(args.repeats):
@@ -140,6 +182,9 @@ def measure(
         "n_steps": args.n_steps,
         "n_epochs": args.n_epochs,
         "gin_layers": args.gin_layers,
+        "vec_env": args.vec_env,
+        "torch_compile": int(args.torch_compile),
+        "compile_mode": args.compile_mode if args.torch_compile else "",
         "obs_dim": observation_size(
             cap,
             max_resources,
@@ -182,7 +227,9 @@ def main() -> None:
         f"host benchmark: instances={len(instances)} "
         f"activities={max(len(i.activities) for i in instances)} "
         f"resources={max_resources} device={args.device} "
-        f"rollout={rollout_size} epochs={args.n_epochs}"
+        f"rollout={rollout_size} epochs={args.n_epochs} "
+        f"vec_env={args.vec_env} compile={args.torch_compile}"
+        f"{'/' + args.compile_mode if args.torch_compile else ''}"
     )
 
     rows = []
