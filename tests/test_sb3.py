@@ -284,6 +284,38 @@ class Sb3Test(unittest.TestCase):
         finally:
             vector_env.close()
 
+    def test_ppo_reads_exact_state_caps_from_subprocess_env(self):
+        training_instance = load_core_instance(TEST_INSTANCE)
+        vector_env = make_vector_env(
+            [
+                lambda: make_multi_env([TEST_INSTANCE]),
+                lambda: make_multi_env([TEST_INSTANCE_2]),
+            ],
+            backend="subproc",
+            start_method="spawn",
+        )
+        try:
+            model = create_ppo(
+                vector_env,
+                instances=[training_instance],
+                n_steps=2,
+                batch_size=4,
+                n_epochs=1,
+                gin_layers=1,
+                seed=1,
+                device="cpu",
+            )
+            self.assertEqual(
+                model.policy.features_extractor.max_horizon,
+                vector_env.get_attr("max_horizon")[0],
+            )
+            self.assertEqual(
+                model.policy.features_extractor.max_resources,
+                vector_env.get_attr("max_resources")[0],
+            )
+        finally:
+            vector_env.close()
+
     def test_sampled_evaluation_uses_prefix_minima_and_restores_cache(self):
         training_instance = load_core_instance(TEST_INSTANCE)
         env = make_multi_env([TEST_INSTANCE])

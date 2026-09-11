@@ -99,6 +99,33 @@ def _cache_from_extractor(extractor: SharedDirectedGINExtractor) -> StaticGraphC
     )
 
 
+def _environment_attribute(env, name: str, default):
+    """Read an environment attribute through either VecEnv backend.
+
+    ``DummyVecEnv`` exposes its workers as ``env.envs`` while
+    ``SubprocVecEnv`` keeps them in child processes and only exposes
+    ``get_attr``.  Training normally uses the latter once ``n_envs > 1``;
+    falling back to a local wrapper lookup made the exact-state dimensions
+    appear as zero and aborted model construction before the first rollout.
+    """
+    get_attr = getattr(env, "get_attr", None)
+    if get_attr is not None:
+        try:
+            values = get_attr(name)
+        except (AttributeError, RuntimeError, TypeError):
+            values = []
+        if values:
+            return values[0]
+
+    workers = getattr(env, "envs", None)
+    if workers:
+        worker = getattr(workers[0], "unwrapped", workers[0])
+        value = getattr(worker, name, None)
+        if value is not None:
+            return value
+    return default
+
+
 def create_ppo(
     env,
     *,
@@ -140,11 +167,24 @@ def create_ppo(
     if mixed_precision not in {"none", "bf16", "fp16"}:
         raise ValueError("mixed_precision must be one of: none, bf16, fp16")
     action_count = int(env.action_space.n)
-    base_env = env.envs[0] if hasattr(env, "envs") else env
-    base_env = getattr(base_env, "unwrapped", base_env)
     max_activities = action_count
-    max_resources = int(getattr(base_env, "max_resources", 0))
-    max_horizon = int(getattr(base_env, "max_horizon", 0))
+    max_resources = int(
+        _environment_attribute(
+            env,
+            "max_resources",
+            max(instance.resource_count for instance in instances),
+        )
+    )
+    max_horizon = int(
+        _environment_attribute(
+            env,
+            "max_horizon",
+            max(
+                sum(activity.duration for activity in instance.activities.values())
+                for instance in instances
+            ),
+        )
+    )
     if max_resources < 1 or max_horizon < 1:
         raise ValueError(
             "environment must expose positive max_resources and max_horizon"
@@ -157,7 +197,9 @@ def create_ppo(
             "environment observation has incompatible RCPSP layout: "
             f"expected {expected_observation_shape}, got {env.observation_space.shape}"
         )
-    max_successors = getattr(base_env, "max_successors", MAX_SUCCESSORS)
+    max_successors = int(
+        _environment_attribute(env, "max_successors", MAX_SUCCESSORS)
+    )
     if static_cache is None:
         static_cache = build_static_graph_cache(
             instances,
