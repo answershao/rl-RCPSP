@@ -16,6 +16,10 @@ from src.envs.observation import (
 )
 
 
+RESOURCE_CONTEXT_DIM = 16
+RESOURCE_TIME_HIDDEN_DIM = 32
+
+
 class DirectedGINLayer(nn.Module):
     """GIN update with separate predecessor and successor relations."""
 
@@ -166,7 +170,13 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
                 f"expected flattened RCPSP observation {(self.layout.size,)}, "
                 f"got {observation_space.shape}"
             )
-        features_dim = max_activities * embedding_dim + global_dim + 2 * max_activities
+        resource_context_dim = RESOURCE_CONTEXT_DIM
+        features_dim = (
+            max_activities * embedding_dim
+            + global_dim
+            + 2 * max_activities
+            + max_activities * resource_context_dim
+        )
         super().__init__(observation_space, features_dim)
         self.max_activities = max_activities
         self.max_resources = max_resources
@@ -174,6 +184,7 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         self.max_successors = max_successors
         self.embedding_dim = embedding_dim
         self.global_dim = global_dim
+        self.resource_context_dim = resource_context_dim
         self.mixed_precision = mixed_precision
         self.set_static_cache(static_cache)
 
@@ -191,6 +202,35 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
         )
         self.gin_layers = nn.ModuleList(
             DirectedGINLayer(embedding_dim, hidden_dim) for _ in range(gin_layers)
+        )
+        # Encode the resource calendar along time before matching it to each
+        # candidate.  The temporal axis remains explicit; only the resource
+        # channels are mixed by the convolution.
+        self.resource_time_encoder = nn.Sequential(
+            nn.Conv1d(
+                max_resources,
+                RESOURCE_TIME_HIDDEN_DIM,
+                kernel_size=5,
+                padding=2,
+            ),
+            nn.ReLU(),
+            nn.Conv1d(
+                RESOURCE_TIME_HIDDEN_DIM,
+                resource_context_dim,
+                kernel_size=1,
+            ),
+            nn.ReLU(),
+        )
+        self.resource_time_key = nn.Linear(resource_context_dim + 1, resource_context_dim)
+        self.resource_time_value = nn.Linear(resource_context_dim + 1, resource_context_dim)
+        self.resource_query = nn.Linear(
+            embedding_dim + max_resources, resource_context_dim
+        )
+        self.register_buffer(
+            "resource_time_positions",
+            th.arange(max_horizon, dtype=th.float32)
+            / float(max(max_horizon - 1, 1)),
+            persistent=False,
         )
 
     def set_static_cache(self, static_cache: StaticGraphCache) -> None:
@@ -276,6 +316,45 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
             return nullcontext()
         dtype = th.bfloat16 if self.mixed_precision == "bf16" else th.float16
         return th.autocast(device_type="cuda", dtype=dtype)
+
+    def _candidate_resource_context(
+        self,
+        observations: th.Tensor,
+        embeddings: th.Tensor,
+        demands: th.Tensor,
+        activity_mask: th.Tensor,
+    ) -> th.Tensor:
+        """Match each activity demand against the future resource calendar."""
+        layout = self.layout
+        batch_size = observations.shape[0]
+        profile = observations[:, layout.resource_profile].reshape(
+            batch_size, self.max_resources, self.max_horizon
+        )
+        temporal = self.resource_time_encoder(profile).transpose(1, 2)
+        positions = self.resource_time_positions.to(dtype=temporal.dtype)
+        positions = positions.view(1, self.max_horizon, 1).expand(batch_size, -1, -1)
+        temporal = th.cat([temporal, positions], dim=-1)
+        keys = self.resource_time_key(temporal)
+        values = self.resource_time_value(temporal)
+
+        query_input = th.cat([embeddings, demands], dim=-1)
+        queries = self.resource_query(query_input)
+        attention_logits = th.einsum("bnd,btd->bnt", queries, keys)
+        attention_logits = attention_logits / float(self.resource_context_dim) ** 0.5
+
+        # The flattened observation pads shorter instance calendars with zero;
+        # prevent padded time slots from receiving attention mass.
+        local_horizon = th.round(
+            observations[:, layout.horizon] * float(self.max_horizon)
+        ).long().clamp(min=1, max=self.max_horizon)
+        time_indices = th.arange(self.max_horizon, device=observations.device)
+        time_mask = time_indices.unsqueeze(0) < local_horizon.unsqueeze(1)
+        attention_logits = attention_logits.masked_fill(
+            ~time_mask.unsqueeze(1), th.finfo(attention_logits.dtype).min
+        )
+        weights = th.softmax(attention_logits, dim=-1)
+        context = th.einsum("bnt,btd->bnd", weights, values)
+        return context * activity_mask.unsqueeze(-1)
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
         with self._autocast(observations):
@@ -371,12 +450,16 @@ class SharedDirectedGINExtractor(BaseFeaturesExtractor):
                 layer(embeddings, predecessor_message, successor_message) * valid_nodes
             )
 
+        resource_context = self._candidate_resource_context(
+            observations, embeddings, demands, activity_mask
+        )
         return th.cat(
             [
                 embeddings.reshape(-1, n * self.embedding_dim),
                 global_embedding,
                 activity_mask,
                 eligible,
+                resource_context.reshape(-1, n * self.resource_context_dim),
             ],
             dim=1,
         )
@@ -421,6 +504,7 @@ class GINActorCriticHeads(nn.Module):
         max_activities: int,
         embedding_dim: int,
         global_dim: int,
+        resource_context_dim: int = RESOURCE_CONTEXT_DIM,
         hidden_dim: int = 64,
         mixed_precision: str = "none",
     ) -> None:
@@ -428,11 +512,12 @@ class GINActorCriticHeads(nn.Module):
         self.max_activities = max_activities
         self.embedding_dim = embedding_dim
         self.global_dim = global_dim
+        self.resource_context_dim = resource_context_dim
         self.mixed_precision = mixed_precision
         self.latent_dim_pi = max_activities
         self.latent_dim_vf = 1
         self.actor = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
+            nn.Linear(embedding_dim + resource_context_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
@@ -454,7 +539,7 @@ class GINActorCriticHeads(nn.Module):
 
     def _unpack(
         self, features: th.Tensor
-    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         n = self.max_activities
         embedding_stop = n * self.embedding_dim
         global_stop = embedding_stop + self.global_dim
@@ -463,19 +548,25 @@ class GINActorCriticHeads(nn.Module):
         global_embedding = features[:, embedding_stop:global_stop]
         activity_mask = features[:, global_stop:mask_stop]
         eligible = features[:, mask_stop:mask_stop + n]
-        return embeddings, global_embedding, activity_mask, eligible
+        context_start = mask_stop + n
+        context_stop = context_start + n * self.resource_context_dim
+        resource_context = features[:, context_start:context_stop].reshape(
+            -1, n, self.resource_context_dim
+        )
+        return embeddings, global_embedding, activity_mask, eligible, resource_context
 
     def forward_actor(self, features: th.Tensor) -> th.Tensor:
         with self._autocast(features):
-            embeddings, _, activity_mask, eligible = self._unpack(features)
-            logits = self.actor(embeddings).squeeze(-1)
+            embeddings, _, activity_mask, eligible, resource_context = self._unpack(features)
+            actor_input = th.cat([embeddings, resource_context], dim=-1)
+            logits = self.actor(actor_input).squeeze(-1)
             legal = (activity_mask > 0.5) & (eligible > 0.5)
             logits = logits.masked_fill(~legal, th.finfo(logits.dtype).min)
         return logits.float()
 
     def forward_critic(self, features: th.Tensor) -> th.Tensor:
         with self._autocast(features):
-            embeddings, global_embedding, activity_mask, _ = self._unpack(features)
+            embeddings, global_embedding, activity_mask, _, _ = self._unpack(features)
             graph_embedding = pool_graph_embedding(
                 embeddings, activity_mask, global_embedding
             )

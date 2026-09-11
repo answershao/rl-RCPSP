@@ -35,12 +35,13 @@ if [[ -f "${RUN_DIR}/final_model.zip" && "${ALLOW_OVERWRITE_BASELINE:-0}" != "1"
 fi
 
 # Total CPU footprint should stay close to the physical cores (52 on the CPU
-# host).  These can be overridden for benchmarking, for example N_ENVS=40.
-N_ENVS="${N_ENVS:-32}"
+# host).  Benchmarking selected 40 environments and 24 Torch threads as the
+# best throughput combination; all values remain overridable for experiments.
+N_ENVS="${N_ENVS:-40}"
 N_STEPS="${N_STEPS:-384}"
 # Minibatch size buys optimiser steps, not throughput: update cost scales with
 # n_epochs * rollout, and measured 512 vs 1024 minibatches differ by <5%.  The
-# default rollout here is 32 * 384 = 12288, so 1024 gives 12 minibatches per
+# default rollout here is 40 * 384 = 15360, so 1024 gives 15 minibatches per
 # epoch instead of 3.  Run `python -m scripts.bench_ppo --help` on the target
 # host to confirm.
 BATCH_SIZE="${BATCH_SIZE:-1024}"
@@ -49,8 +50,9 @@ BATCH_SIZE="${BATCH_SIZE:-1024}"
 # per epoch, four orders of magnitude below TARGET_KL -- the early stop never
 # fires, so the extra epochs are near-zero-movement repeat passes.
 N_EPOCHS="${N_EPOCHS:-3}"
-TORCH_THREADS="${TORCH_THREADS:-20}"
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
+GLOBAL_DIM="${GLOBAL_DIM:-16}"
+TORCH_THREADS="${TORCH_THREADS:-24}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-3000000}"
 LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 ENT_COEF="${ENT_COEF:-0.005}"
 VF_COEF="${VF_COEF:-0.5}"
@@ -61,7 +63,7 @@ TARGET_KL="${TARGET_KL:-0.02}"
 GAMMA="${GAMMA:-1.0}"
 GAE_LAMBDA="${GAE_LAMBDA:-0.98}"
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-12}"
-VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-25}"
+VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-20}"
 VALIDATION_MIN_DELTA="${VALIDATION_MIN_DELTA:-0}"
 CRITICAL_PATH_SHAPING="${CRITICAL_PATH_SHAPING:-0.5}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
@@ -104,6 +106,7 @@ nohup python -m scripts.train_ppo \
     --gamma "${GAMMA}" \
     --gae-lambda "${GAE_LAMBDA}" \
     --gin-layers 2 \
+    --global-dim "${GLOBAL_DIM}" \
     --device cpu \
     --mixed-precision none \
     --vec-env subproc \

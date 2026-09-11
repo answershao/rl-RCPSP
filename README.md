@@ -104,6 +104,10 @@ splits.json      唯一切分协议（生成池 psp_grid_bal）
   `horizon` 和 `time_scale`。时间位置用 duration-sum `horizon` 做无损归一化，
   `makespan_increment` 用实例内最大活动时长归一化；`time_scale` 作为奖励尺度显式输入，
   不再承担有损的时间轴截断。
+- **候选-资源条件交互（2026-09-11）**：保留 `global_dim=16`，在 GIN 节点表示之后对完整
+  resource calendar 做轻量 temporal encoder；每个 activity 用自身 demand 与节点 embedding
+  生成 query，对时间位置做 candidate-conditioned attention。得到的 16 维 resource context
+  只接入 actor，critic 继续使用原 graph pooling，便于单独评估候选-资源交互的收益。
 - **reward 与 episode 指标同样除以 `time_scale`**（不再是 Σd）：γ=1 下回报精确等于
   `-makespan/time_scale` ∈ 约 [−2, −0.9]，value target 落在 O(1)；除 Σd 时它是个近乎
   常数（≈0.3）的弱信号，实测 `explained_variance` 在 +0.55/−1.60 间摆动。

@@ -91,6 +91,10 @@ def parse_args() -> argparse.Namespace:
         help="stop PPO epochs early above this approximate KL; 0 disables it",
     )
     parser.add_argument("--gin-layers", type=int, default=2)
+    parser.add_argument(
+        "--global-dim", type=int, default=16,
+        help="width of the global resource/time-state embedding",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto")
     parser.add_argument(
@@ -443,6 +447,7 @@ def main() -> None:
         or args.critical_path_shaping < 0
         or args.target_kl < 0
         or args.gin_layers < 1
+        or args.global_dim < 1
         or args.torch_threads < 1
         or args.torch_interop_threads < 1
         or args.early_stop_patience < 0
@@ -570,6 +575,7 @@ def main() -> None:
         f"batch={args.batch_size}; epochs={args.n_epochs}; lr={args.learning_rate}; "
         f"ent_coef={args.ent_coef}; gamma={args.gamma}; gae_lambda={args.gae_lambda}; "
         f"critical_path_shaping={args.critical_path_shaping}; "
+        f"global_dim={args.global_dim}; "
         f"objective=makespan_only; caps=({max_activities},{max_resources}); "
         f"max_successors={MAX_SUCCESSORS}; "
         f"state=exact; max_horizon={max_horizon}; "
@@ -624,6 +630,7 @@ def main() -> None:
             vf_coef=args.vf_coef,
             target_kl=args.target_kl or None,
             gin_layers=args.gin_layers,
+            global_dim=args.global_dim,
             mixed_precision=args.mixed_precision,
             torch_compile=args.torch_compile,
             compile_mode=args.compile_mode,

@@ -331,6 +331,12 @@ class Sb3Test(unittest.TestCase):
         )
         try:
             extractor = model.policy.features_extractor
+            self.assertEqual(extractor.global_dim, 16)
+            self.assertEqual(extractor.resource_context_dim, 16)
+            self.assertEqual(
+                model.policy.mlp_extractor.actor[0].in_features,
+                extractor.embedding_dim + extractor.resource_context_dim,
+            )
             reference_env = SimpleNamespace(
                 max_activities=len(training_instance.activities),
                 max_resources=training_instance.resource_count,
@@ -421,6 +427,36 @@ class Sb3Test(unittest.TestCase):
         actor_parameters = {id(item) for item in model.policy.mlp_extractor.actor.parameters()}
         critic_parameters = {id(item) for item in model.policy.mlp_extractor.critic.parameters()}
         self.assertTrue(actor_parameters.isdisjoint(critic_parameters))
+
+        # The resource calendar is now matched to each candidate after GIN;
+        # changing a valid calendar slot must alter the candidate context.
+        with torch.no_grad():
+            features = model.policy.features_extractor(observation_tensor)
+        context_start = (
+            base.activity_count * model.policy.features_extractor.embedding_dim
+            + model.policy.features_extractor.global_dim
+            + 2 * base.activity_count
+        )
+        changed_observation = np.array(observation, copy=True)
+        changed_observation[layout.resource_profile.start] = 1.0
+        changed_tensor, _ = model.policy.obs_to_tensor(changed_observation)
+        with torch.no_grad():
+            changed_features = model.policy.features_extractor(changed_tensor)
+        self.assertFalse(
+            torch.allclose(
+                features[:, context_start:],
+                changed_features[:, context_start:],
+            )
+        )
+
+        # The critic receives only the original graph embeddings and global
+        # embedding; actor-only context changes must not affect its value.
+        context_only = features.clone()
+        context_only[:, context_start:] += 0.25
+        with torch.no_grad():
+            original_value = model.policy.mlp_extractor.forward_critic(features)
+            context_value = model.policy.mlp_extractor.forward_critic(context_only)
+        torch.testing.assert_close(original_value, context_value)
 
         with TemporaryDirectory() as directory:
             model_path = Path(directory) / "model"

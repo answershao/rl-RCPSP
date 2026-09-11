@@ -34,6 +34,7 @@ class GINActorCriticPolicy(ActorCriticPolicy):
             max_activities=extractor.max_activities,
             embedding_dim=extractor.embedding_dim,
             global_dim=extractor.global_dim,
+            resource_context_dim=extractor.resource_context_dim,
             mixed_precision=extractor.mixed_precision,
         )
 
@@ -143,6 +144,7 @@ def create_ppo(
     vf_coef: float = 0.5,
     target_kl: float | None = None,
     gin_layers: int = 2,
+    global_dim: int = 16,
     mixed_precision: str = "none",
     torch_compile: bool = False,
     compile_mode: str = "reduce-overhead",
@@ -154,8 +156,10 @@ def create_ppo(
     The actor selects one eligible activity and the environment inserts it at
     its earliest precedence- and resource-feasible start time.
     """
-    if n_steps < 1 or batch_size < 1 or n_epochs < 1 or gin_layers < 1:
-        raise ValueError("n_steps, batch_size, n_epochs, and gin_layers must be positive")
+    if n_steps < 1 or batch_size < 1 or n_epochs < 1 or gin_layers < 1 or global_dim < 1:
+        raise ValueError(
+            "n_steps, batch_size, n_epochs, gin_layers, and global_dim must be positive"
+        )
     if not 0.0 <= gamma <= 1.0 or not 0.0 <= gae_lambda <= 1.0:
         raise ValueError("gamma and gae_lambda must be between 0 and 1")
     if learning_rate <= 0 or ent_coef < 0 or vf_coef < 0:
@@ -236,7 +240,7 @@ def create_ppo(
                 "gin_layers": gin_layers,
                 "embedding_dim": 32,
                 "hidden_dim": 64,
-                "global_dim": 16,
+                "global_dim": global_dim,
                 "mixed_precision": mixed_precision,
             },
         },
