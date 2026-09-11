@@ -13,13 +13,13 @@ export KMP_BLOCKTIME="${KMP_BLOCKTIME:-0}"
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
 export PYTHONUNBUFFERED=1
 
-MODEL_DIR="${MODEL_DIR:-outputs/experiments/ppo/cpu_baseline}"
+MODEL_DIR="${MODEL_DIR:-outputs/experiments/ppo/cpu_runs/cpu_20260910_194256}"
 DATA_ROOT="${DATA_ROOT:-data}"
 SPLITS_PATH="${SPLITS_PATH:-${PROJECT_ROOT}/splits.json}"
 TORCH_THREADS="${TORCH_THREADS:-20}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
 EVAL_SUITES="${EVAL_SUITES:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
-MODEL_PATH="${MODEL_DIR}/final_model.zip"
+MODEL_PATH="${MODEL_DIR}/checkpoints/best_model.zip"
 
 if [[ ! -f "${MODEL_PATH}" ]]; then
     echo "PPO model not found: ${MODEL_PATH}" >&2

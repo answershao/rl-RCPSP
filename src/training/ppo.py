@@ -428,7 +428,7 @@ def evaluate_paths_sampled(
                         observations[local_env_index] = observation
                         if terminated or truncated:
                             makespans[
-                                trajectory_paths[local_env_index],
+                                batch_start + trajectory_paths[local_env_index],
                                 trajectory_numbers[local_env_index],
                             ] = float(info["makespan"])
                             active[local_env_index] = False

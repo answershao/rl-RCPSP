@@ -36,7 +36,11 @@ if __package__ in {None, ""}:
 
 from scripts.train_ppo import resolve_device
 from src.data.instances import instance_id, loader_for, read_protocol
-from src.training.ppo import MAX_SAMPLE_TRAJECTORIES, evaluate_paths_sampled
+from src.training.ppo import (
+    MAX_SAMPLE_TRAJECTORIES,
+    evaluate_paths,
+    evaluate_paths_sampled,
+)
 
 SAMPLE_BUDGET = MAX_SAMPLE_TRAJECTORIES
 METHOD_NAME = f"PPO-sampled-{SAMPLE_BUDGET}"
@@ -61,12 +65,21 @@ def _evaluate_worker(
     loader,
     name_fn,
     path_offset: int,
-) -> MethodResults:
-    """Load one model per process for sampled evaluation."""
+) -> tuple[MethodResults, MethodResults]:
+    """Load one model per process for deterministic and sampled evaluation."""
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     model = PPO.load(model_path, device=device)
     try:
+        deterministic = evaluate_paths(
+            model,
+            rels,
+            seed,
+            _reference_env_for(model),
+            batch_size=batch_size,
+            loader=loader,
+            name_fn=name_fn,
+        )
         sampled = evaluate_paths_sampled(
             model,
             rels,
@@ -78,7 +91,7 @@ def _evaluate_worker(
             loader=loader,
             name_fn=name_fn,
         )
-        return sampled[SAMPLE_BUDGET]
+        return deterministic, sampled[SAMPLE_BUDGET]
     finally:
         model.policy.set_training_mode(False)
 
@@ -93,13 +106,22 @@ def evaluate_group(
     name_fn,
     workers: int,
     evaluation_seed: int,
-) -> MethodResults:
-    """Evaluate one group with the selected sampled policy."""
+) -> tuple[MethodResults, MethodResults]:
+    """Evaluate one group with deterministic and sampled policies."""
     if not rels:
-        return []
+        return [], []
     if workers == 1:
         model = PPO.load(str(model_path), device=device)
         try:
+            deterministic = evaluate_paths(
+                model,
+                rels,
+                evaluation_seed + seed,
+                _reference_env_for(model),
+                batch_size=batch_size,
+                loader=loader,
+                name_fn=name_fn,
+            )
             sampled = evaluate_paths_sampled(
                 model,
                 rels,
@@ -110,7 +132,7 @@ def evaluate_group(
                 loader=loader,
                 name_fn=name_fn,
             )
-            return sampled[SAMPLE_BUDGET]
+            return deterministic, sampled[SAMPLE_BUDGET]
         finally:
             model.policy.set_training_mode(False)
             del model
@@ -121,7 +143,8 @@ def evaluate_group(
         for start in range(0, len(rels), chunk_size)
     ]
     context = mp.get_context("spawn")
-    results: MethodResults = []
+    deterministic_results: MethodResults = []
+    sampled_results: MethodResults = []
     with ProcessPoolExecutor(
         max_workers=len(chunks), mp_context=context
     ) as executor:
@@ -140,8 +163,10 @@ def evaluate_group(
             for start, chunk_rels in chunks
         ]
         for future in futures:
-            results.extend(future.result())
-    return results
+            deterministic, sampled = future.result()
+            deterministic_results.extend(deterministic)
+            sampled_results.extend(sampled)
+    return deterministic_results, sampled_results
 
 
 def parse_args() -> argparse.Namespace:
@@ -256,6 +281,48 @@ def calculate_metrics(
         "losses": int((delta > 0).sum()),
         "instances": len(results),
     }
+
+
+def print_comparison(
+    group: str,
+    deterministic_results: list[MethodResults],
+    sampled_results: list[MethodResults],
+    reference_rules: dict[str, int] | None,
+) -> None:
+    """Print aggregate deterministic/sampled results for one evaluation group."""
+    deterministic_values = [
+        makespan
+        for seed_results in deterministic_results
+        for _, makespan in seed_results
+    ]
+    sampled = [
+        result
+        for seed_results in sampled_results
+        for result in seed_results
+    ]
+    if not deterministic_values or not sampled:
+        return
+    deterministic_mean = float(np.mean(deterministic_values))
+    sampled_mean = float(np.mean([makespan for _, makespan in sampled]))
+    if reference_rules is None:
+        print(
+            f"{group}: deterministic makespan mean={deterministic_mean:.4f}; "
+            f"sampled-32 makespan mean={sampled_mean:.4f}"
+        )
+        return
+    reference_values = [reference_rules[name] for name, _ in sampled]
+    reference_mean = float(np.mean(reference_values))
+    metrics = calculate_metrics(sampled, reference_rules)
+    print(
+        f"{group}: deterministic makespan mean={deterministic_mean:.4f}; "
+        f"sampled-32 makespan mean={sampled_mean:.4f}; "
+        f"serial_LST mean={reference_mean:.4f}"
+    )
+    print(
+        f"{group}: sampled-32 vs serial_LST: "
+        f"wins={metrics['wins']}, ties={metrics['ties']}, "
+        f"losses={metrics['losses']}"
+    )
 
 
 def write_group_summary(
@@ -448,17 +515,19 @@ def main() -> None:
             )
 
     seed_results: SeedResults = {}
+    deterministic_seed_results: SeedResults = {}
     for seed in args.seeds:
         model_path = args.models_root / f"seed{seed}" / args.model_file
         if not model_path.is_file():
             raise FileNotFoundError(f"PPO model not found: {model_path}")
         print(f"evaluating seed={seed}: {model_path}")
         seed_results[seed] = {}
+        deterministic_seed_results[seed] = {}
         for group, rels in eval_groups.items():
             if not rels:
                 continue
             print(f"  group {group} (n={len(rels)})")
-            seed_results[seed][group] = evaluate_group(
+            deterministic, sampled = evaluate_group(
                 model_path,
                 rels,
                 seed,
@@ -469,8 +538,17 @@ def main() -> None:
                 args.workers,
                 args.evaluation_seed,
             )
+            deterministic_seed_results[seed][group] = deterministic
+            seed_results[seed][group] = sampled
 
     groups = [group for group in eval_groups if any(group in seed_results[s] for s in args.seeds)]
+    for group in groups:
+        print_comparison(
+            group,
+            [deterministic_seed_results[seed].get(group, []) for seed in args.seeds],
+            [seed_results[seed].get(group, []) for seed in args.seeds],
+            reference_rules,
+        )
     for seed in args.seeds:
         seed_dir = args.output_dir / f"seed{seed}"
         for group in groups:

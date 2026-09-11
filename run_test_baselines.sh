@@ -47,7 +47,7 @@ RUN_GA="${RUN_GA:-1}"
 RUN_GPHH="${RUN_GPHH:-0}"
 RUN_AGGREGATE="${RUN_AGGREGATE:-1}"
 ALLOW_OVERWRITE="${ALLOW_OVERWRITE:-0}"
-WITH_PPO="${WITH_PPO:-0}"
+WITH_PPO="${WITH_PPO:-1}"
 PPO_SUMMARY="${PPO_SUMMARY:-outputs/experiments/ppo/ppo_rcpsp/ppo_eval_summary.csv}"
 
 # 0 = full suite; set e.g. SMOKE_MAX_INSTANCES=2 for a smoke run
