@@ -10,7 +10,6 @@ from src.core.rcpsp import (
     generate_schedule,
     preview_serial_sgs_insert,
     priority_fifo,
-    priority_shortest_duration,
     random_priorities,
     serial_sgs_insert,
     validate_schedule,
@@ -46,7 +45,6 @@ class RcpspTest(unittest.TestCase):
     def test_baselines_generate_valid_schedules(self) -> None:
         priorities = [
             priority_fifo,
-            priority_shortest_duration,
             random_priorities(self.instance, seed=7),
         ]
         for priority in priorities:

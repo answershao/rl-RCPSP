@@ -51,10 +51,6 @@ def priority_fifo(activity: Activity) -> int:
     return activity.id
 
 
-def priority_shortest_duration(activity: Activity) -> tuple[int, int]:
-    return (activity.duration, activity.id)
-
-
 def random_priorities(instance: Instance, seed: int) -> dict[ActivityId, float]:
     rng = random.Random(seed)
     return {activity_id: rng.random() for activity_id in instance.activities}

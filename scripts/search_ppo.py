@@ -191,14 +191,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--eval-groups",
-        default="psplib_j30",
+        default="psplib_j30,psplib_j60,psplib_j90,psplib_j120",
         help="comma-separated groups to evaluate: any evaluation group id from "
              "splits.json and/or the 'validation' split",
     )
     parser.add_argument(
         "--ref-rules",
         type=Path,
-        default=Path("outputs/rules_j30/makespan_summary.csv"),
+        default=Path("outputs/rules_psplib/makespan_summary.csv"),
         help="baselines.py CSV covering the evaluated groups (optional)",
     )
     parser.add_argument(

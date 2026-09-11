@@ -18,12 +18,13 @@ MODEL_FILE="${MODEL_FILE:-final_model.zip}"
 OUTPUT_DIR="${OUTPUT_DIR:-${MODELS_ROOT}/inference_search}"
 SPLITS="${SPLITS:-splits.json}"
 DATA_ROOT="${DATA_ROOT:-data}"
-EVAL_GROUPS="${EVAL_GROUPS:-psplib_j30}"
+EVAL_GROUPS="${EVAL_GROUPS:-psplib_j30,psplib_j60,psplib_j90,psplib_j120}"
 # Test-side reference rules: must cover every group in EVAL_GROUPS.  Build the
-# matching CSV first, e.g. for the default group:
-#   python -m scripts.baselines --data-root data --suites psplib_j30 \
-#     --instance-workers 8 --output-csv outputs/rules_j30/makespan_summary.csv
-REF_RULES="${REF_RULES:-outputs/rules_j30/makespan_summary.csv}"
+# matching CSV first:
+#   python -m scripts.baselines --data-root data \
+#     --suites psplib_j30,psplib_j60,psplib_j90,psplib_j120 \
+#     --instance-workers 8 --output-csv outputs/rules_psplib/makespan_summary.csv
+REF_RULES="${REF_RULES:-outputs/rules_psplib/makespan_summary.csv}"
 REF_RULE="${REF_RULE:-serial_LST}"
 SEEDS="${SEEDS:-17}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"

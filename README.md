@@ -30,7 +30,7 @@ src/
                  load_core_instance）· instances.py（splits.json 协议 / loader_for）
   core/          rcpsp.py（单项目内核：Instance + 串行/并行 SGS + 校验）
                  rules.py（25 列优先规则）· ga.py · gphh.py
-  envs/          rcpsp_env.py · multi_instance.py · observation.py · sb3_env.py
+  envs/          rcpsp_env.py · multi_instance.py · observation.py
   training/      ppo.py · features.py（GIN）· environments.py · callbacks.py
   visualization/ aon.py · gantt.py
   data/generator.py  ProGen 风格生成器（可控 n/RF/RS/NC）

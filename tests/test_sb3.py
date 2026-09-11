@@ -23,8 +23,7 @@ from src.envs.observation import (
     build_static_graph_cache,
 )
 from src.envs.rcpsp_env import RCPSPEnv
-from src.envs.sb3_env import make_sb3_env
-from src.training.environments import make_multi_env, make_single_env, make_vector_env
+from src.training.environments import make_multi_env, make_vector_env
 from src.training.callbacks import TERMINAL_METRICS, RCPSPMetricsCallback
 from src.training.features import (
     DirectedGINLayer,
@@ -189,10 +188,8 @@ class Sb3Test(unittest.TestCase):
             side_effect=RuntimeError("fatal error: omp.h: No such file"),
         ):
             self.assertFalse(_torch_compile_available(args))
-        with patch(
-            "scripts.train_ppo.torch.compile",
-            return_value=lambda tensor: tensor,
-        ):
+        with patch("scripts.train_ppo.shutil.which", return_value="/usr/bin/g++"), \
+             patch("scripts.train_ppo.torch.compile", return_value=lambda tensor: tensor):
             self.assertTrue(_torch_compile_available(args))
 
     def test_unpadded_edge_aggregation_matches_padded_forward_and_gradient(self):
@@ -255,8 +252,8 @@ class Sb3Test(unittest.TestCase):
                 load_reference_rules(result_path, "does_not_exist")
 
     def test_ppo_rejects_misaligned_static_cache(self):
-        base = RCPSPEnv(TEST_INSTANCE)
-        env = make_sb3_env(TEST_INSTANCE)
+        base = RCPSPEnv(load_core_instance(TEST_INSTANCE))
+        env = make_multi_env([TEST_INSTANCE])
         cache = build_static_graph_cache(
             [base.instance],
             max_activities=base.activity_count,
@@ -277,10 +274,6 @@ class Sb3Test(unittest.TestCase):
         env.close()
 
     def test_training_environment_factories(self):
-        single = make_single_env(TEST_INSTANCE)
-        observation, _ = single.reset(seed=1)
-        self.assertTrue(single.observation_space.contains(observation))
-
         vector_env = make_vector_env(
             [lambda: make_multi_env([TEST_INSTANCE])],
             backend="dummy",
@@ -293,7 +286,7 @@ class Sb3Test(unittest.TestCase):
 
     def test_sampled_evaluation_uses_prefix_minima_and_restores_cache(self):
         training_instance = load_core_instance(TEST_INSTANCE)
-        env = make_sb3_env(TEST_INSTANCE)
+        env = make_multi_env([TEST_INSTANCE])
         model = create_ppo(
             env,
             instances=[training_instance],
@@ -342,7 +335,7 @@ class Sb3Test(unittest.TestCase):
             env.close()
 
     def test_adapter_and_short_learning_run(self):
-        base = RCPSPEnv(TEST_INSTANCE)
+        base = RCPSPEnv(load_core_instance(TEST_INSTANCE))
         # SB3's env_checker warns that the per-activity observation matrices
         # (dynamic_activity_features / resource_demands / resource_profile) are
         # neither images nor flat 1D vectors.  That 2D activity x feature layout
@@ -362,7 +355,7 @@ class Sb3Test(unittest.TestCase):
             load_core_instance(TEST_INSTANCE),
             load_core_instance(TEST_INSTANCE_2),
         ]
-        env = make_sb3_env(TEST_INSTANCE)
+        env = make_multi_env([TEST_INSTANCE])
         model = create_ppo(
             env, instances=training_instances, n_steps=8, batch_size=8,
             n_epochs=1, gin_layers=1,
@@ -385,7 +378,7 @@ class Sb3Test(unittest.TestCase):
         observation_tensor, _ = model.policy.obs_to_tensor(observation)
         distribution = model.policy.get_distribution(observation_tensor)
         probabilities = distribution.distribution.probs.detach().cpu().numpy()[0]
-        base_env = env.unwrapped
+        base_env = env.unwrapped.active_env
         layout = ObservationLayout(base_env.activity_count, base_env.resource_count)
         eligible = observation[layout.eligible_mask] > 0.5
         np.testing.assert_array_equal(probabilities[~eligible], 0.0)

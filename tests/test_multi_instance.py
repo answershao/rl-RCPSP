@@ -11,10 +11,11 @@ from src.envs.observation import (
     MAX_SUCCESSORS,
     ObservationLayout,
     build_static_graph_cache,
+    flatten_observation,
 )
-from src.envs.sb3_env import make_sb3_env
 from src.core.rcpsp import Activity, Instance
 from src.data.adapter import load_core_instance
+from src.envs.rcpsp_env import RCPSPEnv
 from src.training.callbacks import TERMINAL_METRICS
 from tests import TEST_INSTANCE, TEST_INSTANCE_2
 
@@ -61,12 +62,20 @@ class MultiInstanceTest(unittest.TestCase):
             self.assertFalse(truncated)
         self.assertTrue(env.observation_space.contains(observation))
 
-    def test_unpadded_encoding_matches_single_instance_wrapper(self):
+    def test_single_instance_encoding_matches_flattening(self):
         multi_env = MultiInstanceRCPSPEnv([TEST_INSTANCE])
-        single_env = make_sb3_env(TEST_INSTANCE)
+        single_env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
         multi_observation, _ = multi_env.reset(seed=7)
-        single_observation, _ = single_env.reset(seed=7)
-        np.testing.assert_allclose(multi_observation, single_observation)
+        raw_observation, _ = single_env.reset(seed=7)
+        expected = flatten_observation(
+            raw_observation,
+            single_env.instance.capacities,
+            single_env.time_scale,
+            capacity_scale=np.maximum(
+                np.asarray(single_env.instance.capacities, dtype=np.float32), 1.0
+            ),
+        )
+        np.testing.assert_allclose(multi_observation, expected)
 
     def test_observation_layout_covers_each_feature_once(self):
         layout = ObservationLayout(max_activities=5, max_resources=2)

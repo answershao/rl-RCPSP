@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -19,7 +18,6 @@ from src.core.rcpsp import (
     validate_schedule,
 )
 from src.core.rules import rule_makespan
-from src.data.adapter import load_core_instance
 from src.envs.observation import (
     DYNAMIC_ACTIVITY_FEATURE_COUNT,
     RESOURCE_PROFILE_BIN_COUNT,
@@ -106,7 +104,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
 
     def __init__(
         self,
-        instance: Instance | str | Path,
+        instance: Instance,
         *,
         reward_shaping_coef: float = 0.0,
     ):
@@ -114,9 +112,7 @@ class RCPSPEnv(gym.Env[dict[str, np.ndarray], int]):
         if reward_shaping_coef < 0.0:
             raise ValueError("reward_shaping_coef must be non-negative")
         self.reward_shaping_coef = float(reward_shaping_coef)
-        self.instance = (
-            load_core_instance(instance) if isinstance(instance, (str, Path)) else instance
-        )
+        self.instance = instance
         self.activity_ids = tuple(sorted(self.instance.activities))
         self.activity_index = {activity_id: i for i, activity_id in enumerate(self.activity_ids)}
         self.activity_count = len(self.activity_ids)

@@ -10,13 +10,16 @@ from gymnasium.utils.env_checker import check_env
 from src.core.rcpsp import Activity, Instance, generate_schedule, validate_schedule
 from src.core.rules import rule_makespan
 from src.data.adapter import load_core_instance
-from src.envs.observation import ObservationLayout, RESOURCE_PROFILE_BIN_COUNT
+from src.envs.observation import (
+    ObservationLayout,
+    RESOURCE_PROFILE_BIN_COUNT,
+    flatten_observation,
+)
 from src.envs.rcpsp_env import (
     INVALID_ACTION_PENALTY,
     TIME_SCALE_RULE,
     RCPSPEnv,
 )
-from src.envs.sb3_env import FlattenRCPSPObservation
 from src.training.callbacks import TERMINAL_METRICS
 from tests import TEST_INSTANCE
 
@@ -92,7 +95,7 @@ class RcpspEnvTest(unittest.TestCase):
         )
 
     def test_gymnasium_interface(self) -> None:
-        check_env(RCPSPEnv(TEST_INSTANCE), skip_render_check=True)
+        check_env(RCPSPEnv(load_core_instance(TEST_INSTANCE)), skip_render_check=True)
 
     def test_time_scale_is_the_lst_reference_makespan_not_the_duration_sum(self) -> None:
         instance = parallel_instance()
@@ -129,29 +132,33 @@ class RcpspEnvTest(unittest.TestCase):
             self.assertTrue(covered.all())
 
     def test_time_features_saturate_instead_of_leaving_the_declared_range(self) -> None:
-        env = FlattenRCPSPObservation(RCPSPEnv(load_core_instance(TEST_INSTANCE)))
+        env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
         # Force the reference far below any achievable makespan so the overflow
         # path (a policy that overruns the LST reference) is exercised directly.
-        env.env.time_scale = 1
+        env.time_scale = 1
         observation, _ = env.reset(seed=5)
-        self.assertTrue(env.observation_space.contains(observation))
 
-        layout = ObservationLayout(env.env.activity_count, env.env.resource_count)
+        layout = ObservationLayout(env.activity_count, env.resource_count)
         rng = np.random.default_rng(5)
         terminated = False
         peak = 0.0
         while not terminated:
-            eligible = np.flatnonzero(env.env._state.eligible_mask)
+            eligible = np.flatnonzero(env._state.eligible_mask)
             observation, _, terminated, truncated, _ = env.step(int(rng.choice(eligible)))
-            self.assertTrue(env.observation_space.contains(observation))
+            flattened = flatten_observation(
+                observation,
+                env.instance.capacities,
+                env.time_scale,
+            )
+            self.assertTrue(np.all((flattened >= 0.0) & (flattened <= 1.0)))
             self.assertFalse(truncated)
-            peak = max(peak, float(observation[layout.current_time]))
+            peak = max(peak, float(flattened[layout.current_time]))
         # current_time / time_scale would be ~40 without the clip.
         self.assertLessEqual(peak, 1.0)
-        self.assertGreater(env.env.schedule.makespan, 1)
+        self.assertGreater(env.schedule.makespan, 1)
 
     def test_random_episode_has_legal_schedule_and_makespan_reward(self) -> None:
-        env = RCPSPEnv(TEST_INSTANCE)
+        env = RCPSPEnv(load_core_instance(TEST_INSTANCE))
         observation, info = env.reset(seed=11)
         self.assertTrue(env.observation_space.contains(observation))
         self.assertIn("eligible_mask", info)
@@ -220,7 +227,7 @@ class RcpspEnvTest(unittest.TestCase):
 
     def test_critical_path_shaping_preserves_makespan_objective(self) -> None:
         shaping = 0.5
-        env = RCPSPEnv(TEST_INSTANCE, reward_shaping_coef=shaping)
+        env = RCPSPEnv(load_core_instance(TEST_INSTANCE), reward_shaping_coef=shaping)
         observation, _ = env.reset(seed=13)
         total_reward = 0.0
         terminated = False

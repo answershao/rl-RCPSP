@@ -104,13 +104,6 @@ def depth(node: object) -> int:
     return 1 + max(depth(child) for child in node[1:])
 
 
-def size(node: object) -> int:
-    """Number of nodes in a tree."""
-    if is_terminal(node):
-        return 1
-    return 1 + sum(size(child) for child in node[1:])
-
-
 def random_terminal(rng: random.Random) -> object:
     if rng.random() < 0.5:
         return rng.choice(FEATURE_NAMES)

@@ -3,24 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
 from src.envs.multi_instance import MultiInstanceRCPSPEnv
-from src.envs.sb3_env import make_sb3_env
 from src.training.callbacks import TERMINAL_METRICS
 
 
 def monitored_env(env) -> Monitor:
     """Expose episode returns and RCPSP terminal metrics to SB3 logging."""
     return Monitor(env, info_keywords=TERMINAL_METRICS)
-
-
-def make_single_env(instance: str | Path) -> Monitor:
-    """Create a monitored, flattened environment for one instance."""
-    return monitored_env(make_sb3_env(instance))
 
 
 def make_multi_env(
