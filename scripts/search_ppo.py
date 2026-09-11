@@ -34,7 +34,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.train_ppo import resolve_device
-from scripts.ppo_runs import resolve_model_path
+from scripts.ppo_runs import latest_training_run, resolve_model_path
 from src.data.instances import instance_id, loader_for, read_protocol
 from src.training.ppo import (
     MAX_SAMPLE_TRAJECTORIES,
@@ -44,8 +44,28 @@ from src.training.ppo import (
 
 SAMPLE_BUDGET = MAX_SAMPLE_TRAJECTORIES
 METHOD_NAME = f"PPO-sampled-{SAMPLE_BUDGET}"
+DEFAULT_MODEL_FILE = Path("checkpoints/best_model.zip")
 MethodResults = list[tuple[str, float]]
 SeedResults = dict[int, dict[str, MethodResults]]
+
+
+def resolve_search_model_paths(
+    models_root: Path, model_file: Path, seeds: list[int]
+) -> dict[int, Path]:
+    """Select one checkpoint for every seed used by the search.
+
+    The normal search target is always the best checkpoint from the newest
+    timestamped PPO run.  Other model files remain available as an explicit
+    compatibility override for legacy seed layouts.
+    """
+    if model_file == DEFAULT_MODEL_FILE:
+        run_dir = latest_training_run(models_root, DEFAULT_MODEL_FILE)
+        model_path = run_dir / DEFAULT_MODEL_FILE
+        return {seed: model_path for seed in seeds}
+    return {
+        seed: resolve_model_path(models_root, model_file, seed)
+        for seed in seeds
+    }
 
 
 def _reference_env_for(model: PPO) -> SimpleNamespace:
@@ -181,8 +201,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-file",
         type=Path,
-        default=Path("checkpoints/best_model.zip"),
-        help="checkpoint path relative to a seed or timestamped run directory",
+        default=DEFAULT_MODEL_FILE,
+        help="checkpoint override; the default selects best_model.zip from the newest PPO run",
     )
     parser.add_argument("--seeds", nargs="+", type=int, default=[17])
     parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -516,10 +536,9 @@ def main() -> None:
                 f"first missing: {missing[0]}"
             )
 
-    model_paths = {
-        seed: resolve_model_path(args.models_root, args.model_file, seed)
-        for seed in args.seeds
-    }
+    model_paths = resolve_search_model_paths(
+        args.models_root, args.model_file, args.seeds
+    )
     for seed, model_path in model_paths.items():
         print(f"selected model for seed={seed}: {model_path}")
 
