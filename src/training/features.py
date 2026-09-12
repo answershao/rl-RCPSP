@@ -495,6 +495,62 @@ def pool_graph_embedding(
     return th.cat([embedding_mean, embedding_max, global_embedding], dim=1)
 
 
+class _CandidateSelfAttention(nn.Module):
+    """One-layer masked self-attention with pre-LN and a residual connection.
+
+    Inserts a small correction on top of the per-node actor input so that legal
+    activities can exchange information before the per-node scoring MLP. The
+    mask range is the legal set (activity_mask & eligible), keeping illegal
+    activities out of softmax and out of the final logits (which are still
+    masked to -inf downstream). Small init keeps the residual branch near
+    zero at step 0, so training begins from a behaviour close to the baseline
+    and PPO can learn how much to rely on it.
+    """
+
+    def __init__(self, dim: int, num_heads: int) -> None:
+        super().__init__()
+        if dim % num_heads:
+            raise ValueError(f"dim {dim} is not divisible by num_heads {num_heads}")
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.layer_norm = nn.LayerNorm(dim)
+        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
+        self.output = nn.Linear(dim, dim, bias=True)
+        # Small init keeps the branch close to identity at step 0.
+        nn.init.normal_(self.qkv.weight, std=0.02)
+        nn.init.normal_(self.output.weight, std=0.02)
+        nn.init.zeros_(self.qkv.bias)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, x: th.Tensor, legal_mask: th.Tensor) -> th.Tensor:
+        # x: (B, N, D); legal_mask: (B, N) bool, True means legal.
+        batch_size, num_nodes, dim = x.shape
+        y = self.layer_norm(x)
+        qkv = self.qkv(y).reshape(
+            batch_size, num_nodes, 3, self.num_heads, self.head_dim
+        )
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        queries, keys, values = qkv.unbind(0)
+        attn = queries @ keys.transpose(-2, -1)
+        attn = attn / (self.head_dim ** 0.5)
+        attn = attn.masked_fill(
+            ~legal_mask.unsqueeze(1).unsqueeze(2),
+            th.finfo(attn.dtype).min,
+        )
+        # Defensive guard for terminated envs where every key is masked out;
+        # softmax would NaN otherwise. The corresponding logits are masked to
+        # -inf below, so the uniform-distribution fallback does not affect
+        # the categorical sample.
+        all_illegal = ~legal_mask.any(dim=-1)  # (B,)
+        if all_illegal.any():
+            attn = attn.masked_fill(all_illegal.view(-1, 1, 1, 1), 0.0)
+        attn = attn.softmax(dim=-1)
+        attended = (attn @ values).transpose(1, 2).reshape(
+            batch_size, num_nodes, dim
+        )
+        return x + self.output(attended)
+
+
 class GINActorCriticHeads(nn.Module):
     """Independent node-scoring actor and graph-pooling critic."""
 
@@ -521,6 +577,10 @@ class GINActorCriticHeads(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
+        # P0: candidate-set attention. candidate_dim must be divisible by
+        # num_heads; 32 (emb) + 16 (resource ctx) = 48 = 4 * 12.
+        candidate_dim = embedding_dim + resource_context_dim
+        self.candidate_attention = _CandidateSelfAttention(candidate_dim, 4)
         self.critic = nn.Sequential(
             # Input is [node-mean(E) | node-max(E) | global(G)], see
             # pool_graph_embedding; both node statistics are size-stable.
@@ -559,8 +619,14 @@ class GINActorCriticHeads(nn.Module):
         with self._autocast(features):
             embeddings, _, activity_mask, eligible, resource_context = self._unpack(features)
             actor_input = th.cat([embeddings, resource_context], dim=-1)
-            logits = self.actor(actor_input).squeeze(-1)
             legal = (activity_mask > 0.5) & (eligible > 0.5)
+            # P0: candidate-set self-attention so legal activities exchange
+            # information before the per-node scoring MLP. Illegal activities
+            # are excluded from softmax and contribute no logits (masked to
+            # -inf below). The residual branch is initialised near zero, so
+            # the first training step behaves like the baseline.
+            actor_input = self.candidate_attention(actor_input, legal)
+            logits = self.actor(actor_input).squeeze(-1)
             logits = logits.masked_fill(~legal, th.finfo(logits.dtype).min)
         return logits.float()
 
