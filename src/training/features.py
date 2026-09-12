@@ -521,6 +521,11 @@ class _CandidateSelfAttention(nn.Module):
         nn.init.normal_(self.output.weight, std=0.02)
         nn.init.zeros_(self.qkv.bias)
         nn.init.zeros_(self.output.bias)
+        # P0v2: learnable gate. sigmoid(0)=0.5 at step 0, PPO can move toward
+        # 0 (close attention branch) or 1 (adopt attention fully). Pure addition
+        # in P0 made the residual branch a pure noise injection that PPO never
+        # learned to amplify within 5M steps; gate lets PPO self-regulate.
+        self.gate = nn.Parameter(th.tensor(0.0))
 
     def forward(self, x: th.Tensor, legal_mask: th.Tensor) -> th.Tensor:
         # x: (B, N, D); legal_mask: (B, N) bool, True means legal.
@@ -548,7 +553,7 @@ class _CandidateSelfAttention(nn.Module):
         attended = (attn @ values).transpose(1, 2).reshape(
             batch_size, num_nodes, dim
         )
-        return x + self.output(attended)
+        return x + th.sigmoid(self.gate) * self.output(attended)
 
 
 class GINActorCriticHeads(nn.Module):
